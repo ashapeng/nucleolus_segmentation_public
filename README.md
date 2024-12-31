@@ -7,7 +7,7 @@ https://github.com/AllenCell/aics-segmentation/tree/main
 
 follow this instruction: https://github.com/AllenCell/aics-segmentation/blob/main/README.md
 
-## 2. download weberLab_workshop3_nucleolus_segmentation
+## 2. download nucleolus_segmentation_public
 
 Note 1: unzip test_image folder
 
