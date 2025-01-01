@@ -21,10 +21,12 @@ def import_imgs(input_dir: str,image_name: str, is_mask: bool = False):
     """
     Parameters:
     ----------
-    raw_dir: str
+    input_dir: str
         directory to folders having folders of cells containing raw image, nucleus mask, background mask
     image_name: list
         need to include extension
+    is_mask: bool
+        check if the image is a mask (binary image) or not
 
     Returns: 
         img: nDarray
