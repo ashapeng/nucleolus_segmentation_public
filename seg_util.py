@@ -83,8 +83,8 @@ def image_2d_seg(raw_img: np.array, nucleus_mask: None, sigma_2d: float) -> np.a
         smoothed_updated = np.stack([np.where(nucleus[0,...]>0,smoothed_2d[...,i],0) for i in range(smoothed_2d.shape[-1])],axis=2)
         
         for i in range(smoothed_2d.shape[-1]):
-        cutoff1 = threshold_otsu(smoothed_updated[...,i][smoothed_updated[...,i]>0])
-        thresholded[...,i] = np.where(smoothed_2d[...,i]>cutoff1,1,0)
+            cutoff1 = threshold_otsu(smoothed_updated[...,i][smoothed_updated[...,i]>0])
+            thresholded[...,i] = np.where(smoothed_2d[...,i]>cutoff1,1,0)
 
     else:
         for i in range(smoothed_2d.shape[-1]):
