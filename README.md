@@ -9,15 +9,15 @@ The repository is built on Windows 10.
 
 3. Analyzes the correlation between different nucleolar proteins within the nucleolar mask.
 
-# Installation
+# Installation:
 Packages are implemented in Python 3.9
-## Step 1. Installation aicssegmenation
+## Step 1. Installation aicssegmenation:
 
 [aics-segmentation](https://github.com/AllenCell/aics-segmentation/tree/main)
 
 [Install Instruction](https://github.com/AllenCell/aics-segmentation/blob/main/README.md)
 
-## Step 2. Install nucleolus_segmentation_public
+## Step 2. Install nucleolus_segmentation_public:
 - Clone the repository from Github
   cd C:\Projects
   git clone https://github.com/ashapeng/nucleolus_segmentation_public.git
@@ -38,7 +38,7 @@ Note 2: Running view function (itkwidgets) may not work, follow [AllenCell's hel
   * You can use the [napari](https://napari.org/stable/tutorials/fundamentals/installation.html#napari-installation) as the alternative, this is more stable than itkwidgets in my hand.
     
 
-## 3.Run this repository
+## 3.Run this repository:
 - 3.1: Unzip test_image folder: this will be the data used for running this repository.
 
 - 3.2. Run nucleolus_seg.ipynb: to test segmentation with one example image, then run batch mode to process folders
