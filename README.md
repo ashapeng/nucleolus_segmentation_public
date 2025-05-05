@@ -1,6 +1,6 @@
-# nuclolus_segmentation
-This repository is built based on the AllenCell segmenter(Classic Image Segmentation), is built with the affiliation with Weber Lab at McGill University.
-The repository is built on Windows 10.
+# Nucleolus Segmentation
+
+A specialized image segmentation tool for nucleolus analysis, developed during my time at Weber Lab at McGill University. This repository is built on the basis of AllenCell segmenter (Classic Image Segmentation).
 
 # Goals:
 1. Segments the nucleolus with markers of granular component (GC).
@@ -9,38 +9,39 @@ The repository is built on Windows 10.
 
 3. Analyzes the correlation between different nucleolar proteins within the nucleolar mask.
 
-# Installation:
-Packages are implemented in Python 3.9
-## Step 1. Installation aicssegmenation:
+# Installation
 
-[aics-segmentation](https://github.com/AllenCell/aics-segmentation/tree/main)
+## Prerequisites
+- Python 3.9
+- Anaconda (recommended)
 
-[Install Instruction](https://github.com/AllenCell/aics-segmentation/blob/main/README.md)
+## Step 1: Install aics-segmentation
+1. Visit the [aics-segmentation repository](https://github.com/AllenCell/aics-segmentation/tree/main)
+2. Follow the [official installation guide](https://github.com/AllenCell/aics-segmentation/blob/main/README.md)
 
-## Step 2. Install nucleolus_segmentation_public:
-- Clone the repository from Github
-  cd C:\Projects
-  git clone https://github.com/ashapeng/nucleolus_segmentation_public.git
-  
-- Or you can download ZIP save it to the project folder
+## Step 2: Install nucleolus_segmentation_public
+1. Clone the repository:
+   ```bash
+   cd C:\Projects
+   git clone https://github.com/ashapeng/nucleolus_segmentation_public.git
+   ```
+   
+   Alternatively, download the ZIP file and extract it to your project folder.
 
-Note 1: Check the installer.txt file for essential packages to run this repository.
+2. Install required packages:
+   ```bash
+   cd C:\Projects\nucleolus_segmentation_public
+   pip install -r installer.txt
+   ```
 
-To install all packages, in anaconda prompt
-```bash
-cd C:\Projects\nucleolus_segmentation_public
-pip install -r installer.txt
-```
-
-Note 2: Running view function (itkwidgets) may not work, follow [AllenCell's help]:
-  * https://github.com/AllenCell/aics-segmentation/blob/main/README.md
-
-  * You can use the [napari](https://napari.org/stable/tutorials/fundamentals/installation.html#napari-installation) as the alternative, this is more stable than itkwidgets in my hand.
-    
+## Visualization Tools
+For visualization, you have two options:
+1. **itkwidgets**: Follow the [AllenCell's help guide](https://github.com/AllenCell/aics-segmentation/blob/main/README.md)
+2. **napari** (recommended): More stable alternative. Installation instructions available at [napari.org](https://napari.org/stable/tutorials/fundamentals/installation.html#napari-installation)
 
 ## 3.Run this repository:
 - 3.1: Unzip test_image folder: this will be the data used for running this repository.
 
 - 3.2. Run nucleolus_seg.ipynb: to test segmentation with one example image, then run batch mode to process folders
 
-- 3-3. Run nucleolus_feature_descriptor.ipynb or intensity based analysis, after save nucleolar mask in 3.2
+- 3.3. Run nucleolus_feature_descriptor.ipynb or intensity based analysis, after save nucleolar mask in 3.2

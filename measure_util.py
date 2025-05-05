@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 # import self_defined functions
 import seg_util as su
 
-from Import_Functions import import_folder, import_imgs
+from Import_Functions import import_imgs
 from scipy import ndimage as ndi
 from skimage import io, filters
 from scipy.ndimage import gaussian_filter
@@ -20,108 +20,127 @@ from skimage.morphology import disk,ball,binary_dilation,binary_closing,binary_o
 #             mask based analysis              #
 ################################################
 
-def shape_discriber(seg_mask: np.array, resolution:List, cell_id:str, measured_parameters:List):
+def shape_discriber(structure_mask: np.array, resolution:List, cell_id:str, measured_parameters:List):
     """
-    ----------
-    Parameters:
-    -----------
-    seg_mask: nD array
-        segmented mask
-    resolution: list
-        The resolution of the image: as[z,y,x]
-    cell_id: str
-        the id of the cell: in the form of: 'experiment_set'_'cell folder'
-    measured_parameters: list 
-        the parameters of the measurements as strings
-        should be:["cell_id", "obj_id", "surface_area", "volume" , "surface_to_volume_ratio", "sphericity", "aspect_ratio","solidity"]
-    Returns:
-    --------
-    df: pandas dataframe
-        measurements stored as dataframe for each cell
+        ----------
+        Parameters:
+        -----------
+        structure_mask: nD array
+            segmented mask
+        
+        resolution: list
+            The resolution of the image: as[z,y,x]
+        
+        cell_id: str
+            the id of the cell: in the form of: 'experiment_set'_'cell folder'
+        
+        measured_parameters: list 
+            the parameters of the measurements as strings
+            should be:["cell_id", "obj_id", "surface_area", "volume" , "surface_to_volume_ratio", "sphericity", "aspect_ratio","solidity"]
+            updated as needed. make sure also update the shape_discriber function
+        
+        Returns:
+        --------
+        df: pandas dataframe
+            measurements stored as dataframe for each cell
     """
+
+    #  expand the cavas to avoid the object touching the boundary
+    structure_mask = np.pad(structure_mask,5,'constant',constant_values=0)
 
     # label object with distinct number and return object dataframe
-    labeled_mask, num_objs = label(seg_mask, return_num=True,connectivity=2)
+    if np.count_nonzero(structure_mask) == 0:
+        
+        # create a pd_dataframe with the parameters as columns, and values as None
+        df = pd.DataFrame(columns=measured_parameters,index=[0])
+       
+       # store measurements in dataframe: fill with 0 except cell_id
+        for key in measured_parameters:
+            if key == "cell_id":
+                df.loc[0,key] = cell_id
+            else:
+                df.loc[0,key] = 0
 
-    # create a pd_dataframe to store measurements
-    variables: Dict[str, Any] = {}
-    for key in measured_parameters:
-        variables[key] = None
-    df = pd.DataFrame(variables, index=range(1,num_objs+1))
-    
-    # meaure all objects in one image
-    for i in range(1,num_objs+1):
-        obj_seg = np.where(labeled_mask==i,labeled_mask,0)
+    else:
+        labeled_mask, num_objs = label(structure_mask, return_num=True,connectivity=2)
+        df = pd.DataFrame(columns=measured_parameters, index=range(1,num_objs+1))
         
-        # measure size: volume, surface
-        verts_surf,faces_surf, normals_surf,values_surf = marching_cubes(
-            obj_seg,spacing=tuple(resolution),allow_degenerate=True)
-        surface_area = mesh_surface_area(verts_surf,faces_surf)
-        voxel_vol = resolution[0]*resolution[1]*resolution[2]
-        vol = np.count_nonzero(obj_seg)*voxel_vol
-        
-        # surface-to-volume ratio
-        sv_ratio = surface_area/vol
-        
-        # sphericity: calculate spheracity based on the definition by Wadell 1935
-        equiv_sphere_surf = ((np.pi)**(1/3))*((6*vol)**(2/3))
-        sphericity = equiv_sphere_surf/surface_area
-        
+        if len(structure_mask.shape) == 3 and len(resolution) == 3:
+            ##############################################################################
+            # move object into a larger frame to calculate aspect_ratio and bbox,    #####
+            # because major and minor axis will still be returned but not accurately,#####
+            # if the bbox extend the image boundary                                  #####
+            ##############################################################################
+            labeled_mask = np.pad(labeled_mask,(int(labeled_mask.shape[0]/2),),'constant')
+            resolution = [0.2, 0.126, 0.126]
+            
+            # meaure all objects in one image
+            for i in range(1,num_objs+1):
+                obj_seg = np.where(labeled_mask==i,labeled_mask,0)
+                
+                # measure size: volume, surface
+                verts_surf,faces_surf, normals_surf,values_surf = marching_cubes(
+                    obj_seg,spacing=tuple(resolution),allow_degenerate=True)
+                surface_area = mesh_surface_area(verts_surf,faces_surf)
+                voxel_vol = resolution[0]*resolution[1]*resolution[2]
+                vol = np.count_nonzero(obj_seg)*voxel_vol
+                
+                # surface-to-volume ratio
+                sv_ratio = surface_area/vol
+                
+                # sphericity: calculate spheracity based on the definition by Wadell 1935
+                equiv_sphere_surf = ((np.pi)**(1/3))*((6*vol)**(2/3))
+                sphericity = equiv_sphere_surf/surface_area
 
-        ##############################################################################
-        # move object into a larger frame to calculate aspect_ratio and bbox,    #####
-        # because major and minor axis will still be returned but not accurately,#####
-        # if the bbox extend the image boundary                                  #####
-        ##############################################################################
-        # create new image frame
-        new_img_frame = np.empty(shape=tuple([i *2 for i in obj_seg.shape]),dtype=obj_seg.dtype)
-        
-        # get the coordinate of centroid of the old image, set it as the center of new frame
-        centroid = regionprops(obj_seg)[0]["centroid"]
-        frame_center = tuple([i*0.5 for i in new_img_frame.shape])
-        
-        # get steps of moving centroid
-        shifts = [int(axis[0]-axis[1]) for axis in list(zip(frame_center,centroid))]
-
-        # move object
-        # get non-zero index of the object from the original image
-        non_0_corr = np.nonzero(obj_seg)
-
-        # get coordinates for post-shift
-        new_z = [z + shifts[0] for z in non_0_corr[0]]
-        new_r = [r + shifts[1] for r in non_0_corr[1]]
-        new_c = [c + shifts[2] for c in non_0_corr[2]]
-        new_coordinates = list(zip(new_z,new_r,new_c))
-
-        # create object on new image frame
-        for zrc in new_coordinates:
-            new_img_frame[zrc[0],zrc[1],zrc[2]]=1
-        
-        # aspect ratio bbox
-        aspect_ratio = regionprops(new_img_frame)[0]["axis_minor_length"]/regionprops(new_img_frame)[0]["axis_major_length"]
-        
-        # solidity: ratio of object area to convex hull area
-        solidity = regionprops(new_img_frame)[0]["solidity"]
-        
-        # store measurements in dataframe
-        df.loc[i,df.columns] = pd.Series(
-            [cell_id, i, surface_area, vol, sv_ratio, sphericity, aspect_ratio, solidity], index=df.columns
-            )
+                aspect_ratio = regionprops(obj_seg)[0]["axis_minor_length"]/regionprops(obj_seg)[0]["axis_major_length"]
+                solidity = regionprops(obj_seg)[0]["solidity"]
+                # store measurements in dataframe for each object
+                df.loc[i,df.columns] = pd.Series(
+                    [cell_id, i, surface_area, vol, sv_ratio, sphericity, aspect_ratio, solidity], index=df.columns
+                    )
+                
+        if len(structure_mask.shape) == 2 and len(resolution) == 2:
+            labeled_mask = np.pad(labeled_mask,(int(labeled_mask.shape[0]/2),int(labeled_mask.shape[1]/2)),'constant')
+            resolution = [0.126, 0.126]
+            for i in range(1,num_objs+1):
+                obj_seg = np.where(labeled_mask==i,labeled_mask,0)
+                print(np.count_nonzero(obj_seg))
+                # measure size: area, perimeter
+                area = np.count_nonzero(obj_seg)*resolution[0]*resolution[1]
+                perimeter = regionprops(obj_seg)[0]["perimeter"]*resolution[0]
+                
+                # surface-to-volume ratio
+                pa_ratio = perimeter/area
+                # circularity
+                sphericity = 4*np.pi*area/(perimeter**2)
+                
+                aspect_ratio = regionprops(obj_seg)[0]["axis_minor_length"]/regionprops(obj_seg)[0]["axis_major_length"]
+                
+                # solidity: ratio of object area to convex hull area
+                solidity = regionprops(obj_seg)[0]["solidity"]
+                
+                # store measurements in dataframe
+                df.loc[i,df.columns] = pd.Series(
+                    [cell_id, i, perimeter, area, pa_ratio, sphericity, aspect_ratio, solidity], index=df.columns
+                    )
     return df
 
 def batch_measure_shape(master_folder:str,mask_name:str, shape_parameters: List):
     """
-    ----------
-    Parameters:
-    -----------
-    master_folder: str
-        direcotory to the folder containing all experiment set
-    shape_parameters: list 
-        the parameters of the measurements as strings
-        should be:["cell_id", "obj_id", "surface_area", "volume" , "surface_to_volume_ratio", "sphericity", "aspect_ratio","solidity"]
-    Returns:
-    --------
-    all_dfs: list of dataframes measured by each cell
+        ----------
+        Parameters:
+        -----------
+        master_folder: str
+            direcotory to the folder containing all experiment set
+        mask_name: str
+            the name of the mask file
+        shape_parameters: list 
+            the parameters of the measurements as strings
+            should be:["cell_id", "obj_id", "surface_area", "volume" , "surface_to_volume_ratio", "sphericity", "aspect_ratio","solidity"]
+            updated as needed. make sure also update the shape_discriber function
+        Returns:
+        --------
+        all_dfs: list of dataframes measured by each cell
     """
     # create a list to store measurements of all cells
     all_dfs = []
