@@ -16,3 +16,29 @@ segmentation:
 measurement:
   resolution_3d: [0.2, 0.08, 0.08]
   resolution_2d: [0.08, 0.08]
+
+ml:
+  # Active backend: "classical" | "nnunet" | "cellpose"
+  default_backend: classical
+
+  nnunet:
+    dataset_id: 1
+    configuration: 2d      # auto-selected for 2.5:1 voxel anisotropy
+    folds: all
+    # Directories — set via env vars OR here (env vars take precedence)
+    # nnUNet_raw: ""
+    # nnUNet_preprocessed: ""
+    # nnUNet_results: ""
+
+  cellpose:
+    model_path: null       # null = pretrained nuclei model (zero-shot)
+    diameter: null         # null = auto-estimate
+    do_3d: true
+    anisotropy: 2.5        # Z_spacing / XY_spacing = 0.2 / 0.08
+
+  augmentation:
+    n_augmentations: 10    # augmented copies per training cell
+    rotation_range: [-180, 180]
+    intensity_scale_range: [0.7, 1.3]
+    elastic_sigma: 5.0
+    elastic_alpha: 80.0

@@ -19,6 +19,27 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "resolution_3d": [0.2, 0.08, 0.08],
         "resolution_2d": [0.08, 0.08],
     },
+    "ml": {
+        "default_backend": "classical",
+        "nnunet": {
+            "dataset_id": 1,
+            "configuration": "2d",
+            "folds": "all",
+        },
+        "cellpose": {
+            "model_path": None,
+            "diameter": None,
+            "do_3d": True,
+            "anisotropy": 2.5,
+        },
+        "augmentation": {
+            "n_augmentations": 10,
+            "rotation_range": [-180, 180],
+            "intensity_scale_range": [0.7, 1.3],
+            "elastic_sigma": 5.0,
+            "elastic_alpha": 80.0,
+        },
+    },
 }
 
 

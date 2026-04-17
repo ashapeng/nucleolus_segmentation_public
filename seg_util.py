@@ -539,23 +539,52 @@ def final_gc_holes(spot_mask:np.ndarray, nucleolus_mask:np.ndarray):
 
 ################
 # integrate GC segmentation step into one function
-def gc_segment(raw_image:np.ndarray, nucleus_mask:np.ndarray, sigma: float = None, local_adjust_for_GC: float = None, config=None):
-    '''
-    Parameters:
-    -----------
-    raw_image: nD array
-        The raw data as [plane,row,column, channel]
-    sigma: float
-        the smooth sigma value; overrides config if provided
-    local_adjust_for_GC: float
-        local threshold adjustment ratio; overrides config if provided
-    config: dict, optional
-        configuration dict (from config_loader.load_config); loaded automatically if None
+def gc_segment(
+    raw_image: np.ndarray,
+    nucleus_mask: np.ndarray,
+    sigma: float = None,
+    local_adjust_for_GC: float = None,
+    config=None,
+    backend: str = "classical",
+):
+    """Segment the granular component (GC) of the nucleolus.
 
-    Returns:
-    --------
-    fina_gc: 3D array, holes: 3D array, hole_filled_gc: 3D array
-    '''
+    Parameters
+    ----------
+    raw_image : np.ndarray  (Z, Y, X, C)
+    nucleus_mask : np.ndarray  (Z, Y, X)
+    sigma : float, optional
+        Gaussian smoothing sigma; overrides config when provided.
+    local_adjust_for_GC : float, optional
+        Local threshold adjustment ratio; overrides config when provided.
+    config : dict, optional
+        Config dict from config_loader.load_config(); auto-loaded if None.
+    backend : str
+        Segmentation backend to use:
+          "classical"  — Masked-Object Thresholding + LoG (default, no GPU)
+          "nnunet"     — nnU-Net v2 (requires trained model; see ml/prepare_nnunet.py)
+          "cellpose"   — Cellpose 3 (requires cellpose>=3.0)
+
+    Returns
+    -------
+    final_gc : np.ndarray  (Z, Y, X) uint8  — GC mask, values 0 or 255
+    gc_dark_spot : np.ndarray or None       — hole mask (classical only)
+    hole_filled_gc : np.ndarray  (Z, Y, X) uint8  — GC with holes filled
+    """
+    if backend == "nnunet":
+        from ml.predict_nnunet import gc_segment_nnunet
+        return gc_segment_nnunet(raw_image, nucleus_mask)
+
+    if backend == "cellpose":
+        from ml.predict_cellpose import gc_segment_cellpose
+        if config is None:
+            from config_loader import load_config
+            config = load_config()
+        model_path = config.get("ml", {}).get("cellpose_model_path", None)
+        gc_mask, _ = gc_segment_cellpose(raw_image, nucleus_mask, model_path=model_path)
+        return gc_mask, None, gc_mask.copy()
+
+    # --- classical backend ---
     if config is None:
         from config_loader import load_config
         config = load_config()
@@ -568,24 +597,13 @@ def gc_segment(raw_image:np.ndarray, nucleus_mask:np.ndarray, sigma: float = Non
     mini_size_spot = cfg["mini_size_spot"]
     log_sigma = list(np.arange(cfg["log_sigma_min"], cfg["log_sigma_max"], cfg["log_sigma_step"], dtype=float))
 
-    # Make copies of input data
     raw_img = raw_image.copy()
     nucleus_mask = nucleus_mask.copy()
 
-    # normalize images based on min-max normalization
     normalized_img = np.stack([min_max_norm(raw_img[:,:,:,i]) for i in range(raw_img.shape[-1])],axis=3)
-
-    # 3d smooth raw LPD7 image
     gc_smoothed_final = ndi.gaussian_filter(normalized_img[...,2],sigma=sigma,mode="nearest",truncate=3)
-
-    # otsu segment each channel as for ground and background
-    # adjust local_adjust parameter to make the segmentation more and less
     gc_otsu = global_otsu(gc_smoothed_final, nucleus_mask, global_thresh_method="ave",mini_size=mini_size_otsu,local_adjust=local_adjust_for_GC,extra_criteria=False,keep_largest=True)
-
-    # guassian laplace edge detection vacules in GC
     gc_dark_spot = segment_spot(normalized_img[...,2],nucleus_mask,gc_otsu,LoG_sigma=log_sigma,mini_size=mini_size_spot,invert_raw=True)
-
-    # merge dark spot and gc global mask and only keep holes in final final_gc
     final_gc, hole_filled_gc = final_gc_holes(gc_dark_spot, gc_otsu)
 
     return _to_uint8_mask(final_gc), _to_uint8_mask(gc_dark_spot), _to_uint8_mask(hole_filled_gc)
