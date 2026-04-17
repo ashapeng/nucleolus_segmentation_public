@@ -4,8 +4,11 @@ import os
 import re
 import math
 import glob
+import logging
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 from skimage import io
 from typing import Dict, List
 import matplotlib.pyplot as plt
@@ -38,6 +41,22 @@ from skimage.morphology import remove_small_objects, remove_small_holes,binary_e
 ##              core functions end                         ###
 ##############################################################
 
+def _percentile_clip_and_normalize(img: np.ndarray, percentile: float = 99.9) -> np.ndarray:
+    """Clip to given percentile then min-max normalize to [0, 1]."""
+    clipped = np.clip(img, None, np.percentile(img, percentile))
+    lo, hi = clipped.min(), clipped.max()
+    if hi == lo:
+        return np.zeros_like(clipped, dtype=np.float64)
+    return (clipped - lo) / (hi - lo)
+
+
+def _to_uint8_mask(arr: np.ndarray) -> np.ndarray:
+    """Convert a binary/labelled array to uint8 with positive pixels set to 255."""
+    out = arr.astype(np.uint8)
+    out[out > 0] = 255
+    return out
+
+
 def image_2d_seg(raw_img: np.array, nucleus_mask: None, sigma_2d: float) -> np.array:
     '''
     This to segment the maximal porjection of z-stack images
@@ -62,15 +81,10 @@ def image_2d_seg(raw_img: np.array, nucleus_mask: None, sigma_2d: float) -> np.a
     # maximal projection
     max_projection = np.stack([np.max(raw_img[...,channel],axis=0) for channel in range(raw_img.shape[-1])],axis=2)
 
-    # to avoid speckles in the image: set values greater than the 99.9th percentile to the 99.9th percentile
-    max_projection_truncated = np.zeros_like(max_projection)
-    for channel in range(max_projection.shape[-1]):
-        max_projection_truncated[...,channel] = np.where(max_projection[...,channel]>np.percentile(max_projection[...,channel],99.9),np.percentile(max_projection[...,channel],99.9),max_projection[...,channel])
-
-    # normalize by min_max normalization: (x-min)/(max-min)
-    normalized_max_projection_truncated = np.zeros_like(max_projection_truncated)
-    for channel in range(max_projection_truncated.shape[-1]):
-        normalized_max_projection_truncated[...,channel] = (max_projection_truncated[...,channel]-np.min(max_projection_truncated[...,channel]))/(np.max(max_projection_truncated[...,channel])-np.min(max_projection_truncated[...,channel]))
+    # clip to 99.9th percentile and min-max normalize per channel
+    normalized_max_projection_truncated = np.stack(
+        [_percentile_clip_and_normalize(max_projection[..., c]) for c in range(max_projection.shape[-1])],
+        axis=2)
     
     # smooth
     smoothed_2d = np.stack([ndi.gaussian_filter(normalized_max_projection_truncated[...,channel],sigma=sigma_2d,mode="nearest",truncate=3) for channel in range(normalized_max_projection_truncated.shape[-1])],axis=2)
@@ -80,7 +94,7 @@ def image_2d_seg(raw_img: np.array, nucleus_mask: None, sigma_2d: float) -> np.a
     
     # regional segmentation in the nucleus, only keep signal within the nucleus mask use it to calculate the threshold
     if nucleus_mask is not None:
-        smoothed_updated = np.stack([np.where(nucleus[0,...]>0,smoothed_2d[...,i],0) for i in range(smoothed_2d.shape[-1])],axis=2)
+        smoothed_updated = np.stack([np.where(nucleus_mask[0,...]>0,smoothed_2d[...,i],0) for i in range(smoothed_2d.shape[-1])],axis=2)
         
         for i in range(smoothed_2d.shape[-1]):
             cutoff1 = threshold_otsu(smoothed_updated[...,i][smoothed_updated[...,i]>0])
@@ -318,7 +332,7 @@ def global_otsu(
             local_otsu = threshold_otsu(img[single_obj > 0])
             final_otsu = rn.round_up(local_otsu, rn.decimal_num(local_otsu, two_digit=True))
             #final_otsu = math.ceil(local_otsu)
-            print("otsu:{},rouned otsu:{},ajusted otsu:{}".format(local_otsu, final_otsu, final_otsu * local_adjust))
+            logger.debug("otsu=%.4f  rounded=%.4f  adjusted=%.4f", local_otsu, final_otsu, final_otsu * local_adjust)
             if local_otsu > local_cutoff:
                 bw_high_level[
                     np.logical_and(
@@ -330,7 +344,7 @@ def global_otsu(
             single_obj = lab_low == (idx + 1)
             local_otsu = threshold_otsu(img[single_obj > 0])
             final_otsu = rn.round_up(local_otsu, rn.decimal_num(local_otsu, two_digit=True))
-            print("otsu:{},rouned otsu:{},ajusted otsu:{}".format(local_otsu, final_otsu, final_otsu * local_adjust))
+            logger.debug("otsu=%.4f  rounded=%.4f  adjusted=%.4f", local_otsu, final_otsu, final_otsu * local_adjust)
             bw_high_level[
                 np.logical_and(
                     img > final_otsu * local_adjust, single_obj
@@ -351,13 +365,13 @@ def global_otsu(
     # only keep the largest label
     if keep_largest:
         labeled_mask,label_mask_num = label(global_mask, return_num=True, connectivity=1)
-        print("number of mask is: ", label_mask_num)
+        logger.debug("number of mask objects: %d", label_mask_num)
         mask_id_size = {}
         for id in range(1, label_mask_num+1,1):
             as_id = labeled_mask==id
             vol = np.count_nonzero(as_id)
             mask_id_size["{}".format(id)]=vol
-            print("mask spot volumn",vol)   
+            logger.debug("mask object %d volume: %d voxels", id, vol)
         max_mask_vol_id = int(max(mask_id_size,key=mask_id_size.get))
         segmented_data = np.logical_or(
             np.zeros_like(global_mask),labeled_mask == max_mask_vol_id
@@ -459,11 +473,11 @@ def segment_spot(
 
     # set cutoff as a mean
     cutoff_mean = np.mean(np.array(param_spot),axis=0)[1]
-    print("Use the mean cutoff value",cutoff_mean)
+    logger.debug("spot seg mean cutoff value: %.6f", cutoff_mean)
     updated_param =[ [param_spot[i][0],cutoff_mean] for i in range(len(param_spot))]
     if show_param:
-        print("spot seg parameter is:",param_spot)
-        print("spot seg updated parameter is:",updated_param)
+        logger.info("spot seg parameters: %s", param_spot)
+        logger.info("spot seg updated parameters: %s", updated_param)
    
    # apply LoG filter to spot
     spot_by_LoG = dot_2d_slice_by_slice_wrapper(spot, updated_param)
@@ -492,9 +506,7 @@ def segment_spot(
     # size thresholding: remove object smaller than mini_size
     spot_size_threshold = remove_small_objects(spot_on_multi_z_slices.astype(bool),min_size=mini_size,connectivity=2)
     
-    spot_size_threshold[spot_size_threshold>0]=255
-    
-    return spot_size_threshold
+    return _to_uint8_mask(spot_size_threshold)
 
 def final_gc_holes(spot_mask:np.ndarray, nucleolus_mask:np.ndarray):
     """
@@ -523,31 +535,38 @@ def final_gc_holes(spot_mask:np.ndarray, nucleolus_mask:np.ndarray):
         hole_filled_final[z,:,:] = remove_small_holes(final_gc[z,:,:].astype(bool), area_threshold=np.count_nonzero(nucleolus_mask[z,:,:]),connectivity=2)
     
 
-    final_gc=final_gc.astype(np.uint8)
-    final_gc[final_gc>0]=255
-
-    hole_filled_final=hole_filled_final.astype(np.uint8)
-    hole_filled_final[hole_filled_final>0]=255
-
-    return final_gc, hole_filled_final
+    return _to_uint8_mask(final_gc), _to_uint8_mask(hole_filled_final)
 
 ################
 # integrate GC segmentation step into one function
-def gc_segment(raw_image:np.ndarray, nucleus_mask:np.ndarray, sigma: float, local_adjust_for_GC: float):
+def gc_segment(raw_image:np.ndarray, nucleus_mask:np.ndarray, sigma: float = None, local_adjust_for_GC: float = None, config=None):
     '''
     Parameters:
     -----------
     raw_image: nD array
         The raw data as [plane,row,column, channel]
     sigma: float
-        the smooth sigma value
-        if apply 2d smooth slice by slice input 1 value in each list, if apply 3d smooth input 3 value as the order of [plane,row,column]
+        the smooth sigma value; overrides config if provided
     local_adjust_for_GC: float
-    
+        local threshold adjustment ratio; overrides config if provided
+    config: dict, optional
+        configuration dict (from config_loader.load_config); loaded automatically if None
+
     Returns:
     --------
     fina_gc: 3D array, holes: 3D array, hole_filled_gc: 3D array
     '''
+    if config is None:
+        from config_loader import load_config
+        config = load_config()
+    cfg = config["segmentation"]["gc_segment"]
+    if sigma is None:
+        sigma = cfg["sigma"]
+    if local_adjust_for_GC is None:
+        local_adjust_for_GC = cfg["local_adjust"]
+    mini_size_otsu = cfg["mini_size_otsu"]
+    mini_size_spot = cfg["mini_size_spot"]
+    log_sigma = list(np.arange(cfg["log_sigma_min"], cfg["log_sigma_max"], cfg["log_sigma_step"], dtype=float))
 
     # Make copies of input data
     raw_img = raw_image.copy()
@@ -561,25 +580,15 @@ def gc_segment(raw_image:np.ndarray, nucleus_mask:np.ndarray, sigma: float, loca
 
     # otsu segment each channel as for ground and background
     # adjust local_adjust parameter to make the segmentation more and less
-    gc_otsu = global_otsu(gc_smoothed_final, nucleus_mask, global_thresh_method="ave",mini_size=1000,local_adjust=local_adjust_for_GC,extra_criteria=False,keep_largest=True)
+    gc_otsu = global_otsu(gc_smoothed_final, nucleus_mask, global_thresh_method="ave",mini_size=mini_size_otsu,local_adjust=local_adjust_for_GC,extra_criteria=False,keep_largest=True)
 
     # guassian laplace edge detection vacules in GC
-    gc_dark_spot = segment_spot(normalized_img[...,2],nucleus_mask,gc_otsu,LoG_sigma=list(np.arange(2.5,4,0.25,dtype=float)),mini_size=30,invert_raw=True)
+    gc_dark_spot = segment_spot(normalized_img[...,2],nucleus_mask,gc_otsu,LoG_sigma=log_sigma,mini_size=mini_size_spot,invert_raw=True)
 
     # merge dark spot and gc global mask and only keep holes in final final_gc
     final_gc, hole_filled_gc = final_gc_holes(gc_dark_spot, gc_otsu)
 
-    # save mask
-    final_gc = final_gc.astype(np.uint8)
-    final_gc[final_gc>0]=255
-
-    gc_dark_spot = gc_dark_spot.astype(np.uint8)
-    gc_dark_spot[gc_dark_spot>0]=255
-
-    hole_filled_gc = hole_filled_gc.astype(np.uint8)
-    hole_filled_gc[hole_filled_gc>0]=255
-
-    return final_gc, gc_dark_spot, hole_filled_gc
+    return _to_uint8_mask(final_gc), _to_uint8_mask(gc_dark_spot), _to_uint8_mask(hole_filled_gc)
 ################
 
 def ball_confocol(radius_xy,radius_z, dtype=np.uint8):
