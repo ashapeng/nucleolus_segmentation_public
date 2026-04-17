@@ -4,7 +4,10 @@ import os
 import pandas as pd
 import math
 import glob
+import logging
 from typing import Dict, List, Any
+
+logger = logging.getLogger(__name__)
 
 import matplotlib.pyplot as plt
 # import self_defined functions
@@ -19,6 +22,17 @@ from skimage.morphology import disk,ball,binary_dilation,binary_closing,binary_o
 ################################################
 #             mask based analysis              #
 ################################################
+
+def extract_stage(cell_id: str) -> str:
+    """Extract larval stage (L1–L4) from a cell_id string using a regex.
+
+    Raises ValueError if the stage cannot be determined.
+    """
+    match = re.search(r'\b(L[1-4])\b', cell_id)
+    if match is None:
+        raise ValueError(f"Cannot extract larval stage from cell_id: {cell_id!r}")
+    return match.group(1)
+
 
 def shape_discriber(structure_mask: np.array, resolution:List, cell_id:str, measured_parameters:List):
     """
@@ -72,8 +86,7 @@ def shape_discriber(structure_mask: np.array, resolution:List, cell_id:str, meas
             # if the bbox extend the image boundary                                  #####
             ##############################################################################
             labeled_mask = np.pad(labeled_mask,(int(labeled_mask.shape[0]/2),),'constant')
-            resolution = [0.2, 0.126, 0.126]
-            
+
             # meaure all objects in one image
             for i in range(1,num_objs+1):
                 obj_seg = np.where(labeled_mask==i,labeled_mask,0)
@@ -101,10 +114,9 @@ def shape_discriber(structure_mask: np.array, resolution:List, cell_id:str, meas
                 
         if len(structure_mask.shape) == 2 and len(resolution) == 2:
             labeled_mask = np.pad(labeled_mask,(int(labeled_mask.shape[0]/2),int(labeled_mask.shape[1]/2)),'constant')
-            resolution = [0.126, 0.126]
             for i in range(1,num_objs+1):
                 obj_seg = np.where(labeled_mask==i,labeled_mask,0)
-                print(np.count_nonzero(obj_seg))
+                logger.debug("2D object %d voxel count: %d", i, np.count_nonzero(obj_seg))
                 # measure size: area, perimeter
                 area = np.count_nonzero(obj_seg)*resolution[0]*resolution[1]
                 perimeter = regionprops(obj_seg)[0]["perimeter"]*resolution[0]
@@ -125,7 +137,7 @@ def shape_discriber(structure_mask: np.array, resolution:List, cell_id:str, meas
                     )
     return df
 
-def batch_measure_shape(master_folder:str,mask_name:str, shape_parameters: List):
+def batch_measure_shape(master_folder:str, mask_name:str, shape_parameters: List, resolution_3d: List = None, config=None):
     """
         ----------
         Parameters:
@@ -134,14 +146,24 @@ def batch_measure_shape(master_folder:str,mask_name:str, shape_parameters: List)
             direcotory to the folder containing all experiment set
         mask_name: str
             the name of the mask file
-        shape_parameters: list 
+        shape_parameters: list
             the parameters of the measurements as strings
             should be:["cell_id", "obj_id", "surface_area", "volume" , "surface_to_volume_ratio", "sphericity", "aspect_ratio","solidity"]
             updated as needed. make sure also update the shape_discriber function
+        resolution_3d: list, optional
+            voxel dimensions [z_um, y_um, x_um]; overrides config if provided
+        config: dict, optional
+            configuration dict (from config_loader.load_config); loaded automatically if None
         Returns:
         --------
         all_dfs: list of dataframes measured by each cell
     """
+    if config is None:
+        from config_loader import load_config
+        config = load_config()
+    if resolution_3d is None:
+        resolution_3d = config["measurement"]["resolution_3d"]
+
     # create a list to store measurements of all cells
     all_dfs = []
 
@@ -156,15 +178,15 @@ def batch_measure_shape(master_folder:str,mask_name:str, shape_parameters: List)
             # read individual cell folder
             for cell in os.listdir(experiment_set_dir):
                 cell_seg_dir = os.path.join(experiment_set_dir,cell)
-                cell_id = date + "\\" + os.path.basename(cell_seg_dir)
-                print(cell_seg_dir)
+                cell_id = date + os.sep + os.path.basename(cell_seg_dir)
+                logger.info("Processing: %s", cell_seg_dir)
 
                 # read the images
                 mask = import_imgs(cell_seg_dir, mask_name)
 
                 # measure GC mask for each cell and return data frame
                 each_cell_df = shape_discriber(
-                mask, resolution=[0.2, 0.08, 0.08],cell_id=cell_id,
+                mask, resolution=resolution_3d, cell_id=cell_id,
                 measured_parameters=shape_parameters)
                 all_dfs.append(each_cell_df)
     
@@ -215,7 +237,7 @@ def group_gc_measure_df(measurement_dfs:List,number_parameters:List, size_parame
     # sort values from raw dataframe in different feature dataframes
     for index, row in by_cell_df.iterrows():
         # extract larval stage from cell_id
-        stage = row["cell_id"][row["cell_id"].find("L"):row["cell_id"].find("L")+2]
+        stage = extract_stage(row["cell_id"])
 
         # count number of objects
         obj_count = float(df.loc[df["cell_id"]==row["cell_id"],["obj_id"]].max().iloc[0])
@@ -245,7 +267,7 @@ def group_gc_measure_df(measurement_dfs:List,number_parameters:List, size_parame
     size_by_obj_df = df[["cell_id", "obj_id", "surface_area", "volume", "surface_to_volume_ratio"]].copy()
 
     for index, row in size_by_obj_df.iterrows():
-        size_by_obj_df.loc[index,"stage"] = row["cell_id"][row["cell_id"].find("L"):row["cell_id"].find("L")+2]
+        size_by_obj_df.loc[index,"stage"] = extract_stage(row["cell_id"])
 
     size_by_obj_df = size_by_obj_df.sort_values("stage",ascending=True)
     size_by_obj_df = size_by_obj_df.reset_index(drop=True)
@@ -254,7 +276,7 @@ def group_gc_measure_df(measurement_dfs:List,number_parameters:List, size_parame
     morphology_by_obj_df = df[["cell_id","obj_id","sphericity", "aspect_ratio","solidity"]].copy()
 
     for index, row in morphology_by_obj_df.iterrows():
-        morphology_by_obj_df.loc[index,"stage"] = row["cell_id"][row["cell_id"].find("L"):row["cell_id"].find("L")+2]
+        morphology_by_obj_df.loc[index,"stage"] = extract_stage(row["cell_id"])
 
     morphology_by_obj_df = morphology_by_obj_df.sort_values("stage",ascending=True)
     morphology_by_obj_df = morphology_by_obj_df.reset_index(drop=True)
@@ -340,7 +362,7 @@ def dilated_mask(mask:np.array, radius: int, dilated_3d: bool = False, dilate_sl
     dilated_mask: 3D array
     """
     # dilate mask in 3d
-    if if_dilated:
+    if dilated_3d:
         dilated_mask = binary_dilation(mask, footprint=ball(radius))
 
     # dilate mask slice-by-slice
@@ -541,7 +563,7 @@ def overlap_3channel (top_img: np.array, cell_id: str):
 
     colocal_df.loc[0,colocal_df.columns] = pd.Series([cell_id,rg_over_r,rg_over_g,rb_over_r,rb_over_b,gb_over_g,gb_over_b,rgb_over_r,rgb_over_g,rgb_over_b],index=colocal_df.columns)
 
-    colocal_df["stage"] = cell_id[cell_id.find("L"):cell_id.find("L")+2]
+    colocal_df["stage"] = extract_stage(cell_id)
 
     return colocal_df
 
@@ -625,6 +647,7 @@ def find_box_in_binary_region(fluorescent_image:np.array, nucleus_mask: np.array
 
     # Initialize variables to store the minimum mean intensity and the corresponding box
     min_mean_intensity = float('inf')
+    top_left_coord = None
     box_radius = box_size // 2
 
     # Iterate over the positive regions
@@ -653,6 +676,9 @@ def find_box_in_binary_region(fluorescent_image:np.array, nucleus_mask: np.array
                     min_mean_intensity = mean_intensity
                     top_left_coord = (y, x)
     
+    if top_left_coord is None:
+        raise ValueError(f"No valid box of size {box_size} found within the binary region.")
+
     # Create the box mask the the corresponding coordinates
     box_mask = np.zeros_like(binary_mask)
     box_mask[top_left_coord[0]-box_radius:top_left_coord[0]+box_radius, top_left_coord[1]-box_radius:top_left_coord[1]+box_radius] = 1
@@ -698,15 +724,20 @@ def concentration_gc(raw_img:np.array, raw_bg_subt:np.array, background_mask:np.
     df = pd.DataFrame(variables, index=[0])
 
     # measure intensity in ROI after background subtraction
-    bg_value = round(float(np.mean(img[background_mask>0])), 1)
-    dilute_value = round(float(np.mean(img[nucleoplasm_mask>0])), 1)
-    gc_value = round(float(np.mean(img[seg_mask>0])), 1)
-    total_value =round(float(np.mean(img[nucleus_mask>0])),1)
+    bg_value = round(float(np.mean(img[background_mask>0])) if np.any(background_mask>0) else float('nan'), 1)
+    nucleoplasm_pixels_bg = img[nucleoplasm_mask>0]
+    dilute_value = round(float(np.mean(nucleoplasm_pixels_bg)) if nucleoplasm_pixels_bg.size > 0 else float('nan'), 1)
+    gc_value = round(float(np.mean(img[seg_mask>0])) if np.any(seg_mask>0) else float('nan'), 1)
+    total_value = round(float(np.mean(img[nucleus_mask>0])) if np.any(nucleus_mask>0) else float('nan'), 1)
 
     # partition coefficient based on raw image
-    gc_value_raw = float(np.mean(raw_gc[seg_mask>0]))
-    dilute_value_raw = float(np.mean(raw_gc[nucleoplasm_mask>0]))
-    pc_value = round(gc_value_raw/dilute_value_raw, 3)
+    gc_value_raw = float(np.mean(raw_gc[seg_mask>0])) if np.any(seg_mask>0) else float('nan')
+    nucleoplasm_pixels_raw = raw_gc[nucleoplasm_mask>0]
+    if nucleoplasm_pixels_raw.size == 0 or float(np.mean(nucleoplasm_pixels_raw)) == 0:
+        pc_value = float('nan')
+    else:
+        dilute_value_raw = float(np.mean(nucleoplasm_pixels_raw))
+        pc_value = round(gc_value_raw / dilute_value_raw, 3)
 
     # measure nuclear area
     # nuclear_area = round((np.count_nonzero(nucleus_mask) *(0.08*0.08)), 3)
@@ -714,7 +745,7 @@ def concentration_gc(raw_img:np.array, raw_bg_subt:np.array, background_mask:np.
     # add to dataframe
     df.loc[0,df.columns] = pd.Series([cell_id,bg_value,dilute_value,gc_value,total_value,pc_value],index=df.columns)
 
-    df["stage"] = cell_id[cell_id.find("L"):cell_id.find("L")+2]
+    df["stage"] = extract_stage(cell_id)
 
     return df
 
@@ -767,7 +798,7 @@ def seg_hole_filled_raw(master_seg_dir:str, master_raw_dir:str, cell_id:str, cha
     return max_raw, contours_seg
 
 def plot_raw_contour(raw: np.array, contours: np.array, cv:float, cell_id:str, channel: int, min_or_max_cv: str, save_dir = None, save_fig: bool = False):
-    new_cell_id = replace_at_index(cell_id, "\\", "_")
+    new_cell_id = replace_at_index(cell_id, os.sep, "_")
     fig, axs = plt.subplots(1,1,figsize=(4,4))
     axs.imshow(raw, cmap="gray")
     for contour in contours:
