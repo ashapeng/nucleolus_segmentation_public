@@ -45,3 +45,17 @@ For visualization, you have two options:
 - 3.2. Run nucleolus_seg.ipynb: to test segmentation with one example image, then run batch mode to process folders
 
 - 3.3. Run nucleolus_feature_descriptor.ipynb or intensity based analysis, after save nucleolar mask in 3.2
+
+# Validating other segmentation tools
+
+The tool-adoption validator that used to live in `validation/` is now a standalone
+package, **[Easy-adopt](https://github.com/ashapeng/Easy-adopt)**. It judges whether a
+new, published, or third-party segmentation tool is a trustworthy drop-in on your own
+data, emitting a Trust Report of flags instead of a single metric (e.g. it returns RED
+for an off-the-shelf nuclei model applied to the nucleolar granular component, despite a
+high IoU). The `nucleolus_gc` structure contract is shipped there.
+
+```bash
+pip install easy-adopt
+easy-adopt --tool stardist --structure nucleolus_gc --cell <your_cell_folder>
+```
