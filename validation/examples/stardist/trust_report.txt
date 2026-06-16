@@ -1,0 +1,25 @@
+TRUST REPORT — tool=stardist  target=nucleolus_gc  crop=20220305_L2/17_1
+======================================================================
+METRICS (context, not verdict):
+  iou_gc: 0.9553695955369595
+  dice_gc: 0.9771754636233951
+  iou_nuclei: 0.29477292202227934
+  area_fraction_of_nucleus: 0.29477292202227934
+  n_objects: 1
+  probe_area_fraction_per_channel: {0: 0.21465295629820053, 1: 0.17395029991431019, 2: 0.29477292202227934}
+  synthetic_hole_fill_fraction: 0.587
+  corpus_median_solidity: 0.973
+  corpus_median_hole_fraction: 0.0
+
+FLAGS:
+  🔴 IDENTITY_MISMATCH: Tool trained on ['nuclei']; target is 'sub_nuclear_condensate'. Wrong structural scale.
+  🟡 COINCIDENCE_RISK: Matches gc (IoU 0.955) but tool is a nuclei detector (IoU vs nuclei 0.295). High score may be channel/crop luck — run probes.
+  🟡 SINGLE_OBJECT: Single object on a single-nucleus crop — high score may not transfer to multi-nucleus fields.
+  🟡 PROBE_WRONG_CHANNEL_INCONCLUSIVE: No channel drove whole-nucleus expansion, but this corpus has no nuclear-fill channel and one nucleus per crop — channel-invariance was NOT exercised. Re-run on a multi-nucleus field with a nuclear stain before trusting.
+  🟡 STAR_CONVEXITY_LATENT: Tool is star-convex (fills 59% of a synthetic hole) and CANNOT represent holed/concave GC. This corpus happens to be compact/hole-free (median solidity 0.97) so it is a LATENT risk — fails on holed nucleoli.
+
+HUMAN-JUDGMENT QUESTIONS:
+  • Is the auto-picked marker channel truly your GC marker?
+  • Do you need per-GC substructure, or is one-blob-per-nucleus acceptable?
+
+OVERALL: RED — NOT a valid drop-in for nucleolus_gc — see RED flags.

@@ -1,0 +1,49 @@
+id: nucleolus_gc
+aliases: [nucleolus, granular_component, GC]
+target_class: sub_nuclear_condensate          # NOT a nucleus / not a cell
+description: >
+  Granular component of the nucleolus: a sub-nuclear, roughly spherical
+  membraneless condensate. One-to-few per nucleus. A correct mask is a SUBSET
+  of the nucleus, never approximately equal to it.
+
+spatial:
+  area_fraction_of_nucleus: [0.05, 0.40]   # GC is a strict subset of the nucleus
+  count_per_nucleus: [1, 4]
+
+# how to pick the correct input channel (channel order is not trustworthy)
+marker_channel:
+  method: enrichment_ratio_in_reference
+  min_enrichment: 1.5
+
+# match the RIGHT reference; be DISqualified by the wrong one
+reference_masks:
+  target:       { file: gc.tif,          role: target,       expect_iou_min: 0.60 }
+  disqualifier: { file: nuclei_mask.tif, role: disqualifier, expect_iou_max: 0.40 }
+  context:      { file: nucleoplasm_mask.tif, role: context }
+
+# named checks the engine runs; thresholds live here, logic lives in the engine
+failure_signatures:
+  metric_too_perfect:    { dice_vs_target_gte: 0.98 }
+  segmenting_the_nucleus: { area_fraction_gt: 0.60 }   # also fires if iou(nuclei) > iou(gc)
+  single_object_coincidence: { n_objects_eq: 1 }
+
+morphology:
+  may_contain_holes: true       # user pipeline uses holes.tif / hole-filling
+  may_be_concave: true
+
+generalization_probes:
+  wrong_channel_invariance:
+    description: "Re-run on non-marker channels; a GC-specific method must NOT expand to ~whole-nucleus."
+    fail_if_any_channel_area_fraction_gt: 0.60
+    # If NO channel drives whole-nucleus expansion the probe is INCONCLUSIVE, not PASS:
+    # it was not exercised (e.g. single-nucleus crop / no nuclear-fill channel).
+
+# capability stress-tests: synthetic crafted inputs that test an architectural property,
+# graded LATENT (corpus doesn't trigger it) vs ACTIVE (corpus morphology does).
+capability_probes:
+  star_convexity:
+    description: "Tool must preserve concave/holed morphology (the GC can have holes)."
+    fail_if_hole_fill_fraction_gt: 0.20
+
+incumbent_method:
+  approach: "intensity threshold + hole-filling + nucleoplasm subtraction (substructure-aware)"
