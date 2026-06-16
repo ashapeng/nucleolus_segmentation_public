@@ -1,0 +1,18 @@
+id: cellpose
+version: "4.2.1.1"
+model: cpsam_v2
+trained_on:
+  structures: [nuclei, cells]   # generalist; not sub-nuclear
+  modality: fluorescence
+output: instance_labels
+io:
+  ndim: 2
+  needs_projection: true
+  channels: single
+weights:
+  source: huggingface
+  weight_host: huggingface.co
+  fetch_at_runtime: true
+  offline_supported: false      # predicts the 403 wall before installing
+known_mismatches:
+  - "sub-nuclear structures (nucleolus, condensates)"
