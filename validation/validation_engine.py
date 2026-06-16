@@ -69,12 +69,14 @@ def synthetic_hole_fill_fraction(runner):
     true_hole = r < 10
     return float((binmax(mask) & true_hole).sum() / max(true_hole.sum(), 1))
 
-def corpus_morphology():
-    """What the real GC actually looks like across the dataset: median solidity & hole fraction."""
+def corpus_morphology(corpus=TEST_IMAGE):
+    """What the GC actually looks like across a dataset: median solidity & hole fraction."""
     from skimage.measure import label, regionprops
     from scipy.ndimage import binary_fill_holes
+    files = sorted(set(glob.glob(os.path.join(corpus, "gc.tif")) +
+                       glob.glob(os.path.join(corpus, "**", "gc.tif"), recursive=True)))
     sols, holes = [], []
-    for f in glob.glob(os.path.join(TEST_IMAGE, "2022*", "*", "gc.tif")):
+    for f in files:
         g = binmax(tifffile.imread(f))
         if g.sum() == 0:
             continue
@@ -86,7 +88,7 @@ def corpus_morphology():
     return float(np.median(sols)), float(np.median(holes)), len(sols)
 
 # ---------- engine ----------
-def run(tool_id, cell=DEFAULT_CELL, artifacts=DEFAULT_ARTIFACTS):
+def run(tool_id, cell=DEFAULT_CELL, artifacts=DEFAULT_ARTIFACTS, corpus=TEST_IMAGE):
     structure = load_yaml(os.path.join(CONTRACTS, "structures", "nucleolus_gc.contract.yaml"))
     tool = load_yaml(os.path.join(CONTRACTS, "tools", f"{tool_id}.contract.yaml"))
     rep = Report()
@@ -112,7 +114,7 @@ def run(tool_id, cell=DEFAULT_CELL, artifacts=DEFAULT_ARTIFACTS):
     if not os.path.exists(cand_path):
         rep.add("AMBER", "NOT_RUN", "Candidate never produced a mask (blocked upstream). "
                 "Metric checks skipped; pre-check flags still stand.")
-        return emit(tool_id, rep, {}, artifacts)
+        return emit(tool_id, rep, {}, artifacts, cell)
 
     cand = tifffile.imread(cand_path)
     n_obj = int(tifffile.imread(lab_path).max()) if os.path.exists(lab_path) else None
@@ -174,7 +176,7 @@ def run(tool_id, cell=DEFAULT_CELL, artifacts=DEFAULT_ARTIFACTS):
     if runner:
         fill = synthetic_hole_fill_fraction(runner)
         metrics["synthetic_hole_fill_fraction"] = round(fill, 3)
-        sol, holef, n = corpus_morphology()                 # what the real data actually looks like
+        sol, holef, n = corpus_morphology(corpus)           # what the target dataset actually looks like
         metrics["corpus_median_solidity"] = round(sol, 3)
         metrics["corpus_median_hole_fraction"] = round(holef, 3)
         active = holef > 0.02 or sol < 0.85                  # does the corpus contain holed/concave GC?
@@ -192,11 +194,12 @@ def run(tool_id, cell=DEFAULT_CELL, artifacts=DEFAULT_ARTIFACTS):
     # human-judgment questions
     rep.ask("Is the auto-picked marker channel truly your GC marker?")
     rep.ask("Do you need per-GC substructure, or is one-blob-per-nucleus acceptable?")
-    return emit(tool_id, rep, metrics, artifacts)
+    return emit(tool_id, rep, metrics, artifacts, cell)
 
-def emit(tool_id, rep, metrics, artifacts):
+def emit(tool_id, rep, metrics, artifacts, cell):
     lvl = {3: "RED", 2: "AMBER", 1: "GREEN"}[rep.worst()]
-    lines = [f"TRUST REPORT — tool={tool_id}  target=nucleolus_gc  crop=20220305_L2/17_1",
+    crop = os.path.relpath(cell, REPO) if cell.startswith(REPO) else os.path.basename(cell.rstrip("/"))
+    lines = [f"TRUST REPORT — tool={tool_id}  target=nucleolus_gc  crop={crop}",
              "=" * 70]
     if metrics:
         lines.append("METRICS (context, not verdict):")
@@ -228,5 +231,6 @@ if __name__ == "__main__":
     ap.add_argument("--tool", default="stardist")
     ap.add_argument("--cell", default=DEFAULT_CELL, help="path to a cell folder with gc.tif/nuclei_mask.tif/Composite_stack.tif")
     ap.add_argument("--artifacts", default=DEFAULT_ARTIFACTS, help="dir containing <tool>/<tool>_mask.tif")
+    ap.add_argument("--corpus", default=None, help="dataset dir for morphology grading (default: the cell's dataset)")
     a = ap.parse_args()
-    run(a.tool, a.cell, a.artifacts)
+    run(a.tool, a.cell, a.artifacts, a.corpus or TEST_IMAGE)
