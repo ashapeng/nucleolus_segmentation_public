@@ -458,17 +458,17 @@ Prefer synthetic TIFF fixtures in `tmp_path` over committing large microscopy da
 
 ## Implementation order (checklist)
 
-- [ ] Task 1 — Scaffold
-- [ ] Task 2 — Inventory
-- [ ] Task 3 — Batch segment
-- [ ] Task 4 — QC
-- [ ] Task 5 — Measure wrappers
-- [ ] Task 6 — Run store + report
-- [ ] Task 7 — Deterministic CLI (**Phase 0 done**)
-- [ ] Task 8 — Agent tools
-- [ ] Task 9 — Orchestrator (**Phase 1 done**)
-- [ ] Task 10 — QC retry loop
-- [ ] Task 11 — Easy-adopt (**Phase 2 done**)
+- [x] Task 1 — Scaffold
+- [x] Task 2 — Inventory
+- [x] Task 3 — Batch segment
+- [x] Task 4 — QC
+- [x] Task 5 — Measure wrappers
+- [x] Task 6 — Run store + report
+- [x] Task 7 — Deterministic CLI (**Phase 0 done**)
+- [x] Task 8 — Agent tools
+- [x] Task 9 — Orchestrator (**Phase 1 done**)
+- [x] Task 10 — QC retry loop
+- [x] Task 11 — Easy-adopt (**Phase 2 done**)
 
 ---
 
