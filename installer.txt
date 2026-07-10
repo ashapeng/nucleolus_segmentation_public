@@ -10,3 +10,5 @@ math
 imageio
 napari
 matplotlib
+pyyaml
+pytest

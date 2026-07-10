@@ -26,9 +26,13 @@ from skimage.morphology import disk,ball,binary_dilation,binary_closing,binary_o
 def extract_stage(cell_id: str) -> str:
     """Extract larval stage (L1–L4) from a cell_id string using a regex.
 
+    Underscores are common in experiment folder names (e.g. ``20220304_L1/10_2``),
+    so this uses an alphanumeric boundary rather than ``\\b`` (which treats ``_``
+    as a word character and would miss ``_L1``).
+
     Raises ValueError if the stage cannot be determined.
     """
-    match = re.search(r'\b(L[1-4])\b', cell_id)
+    match = re.search(r'(?<![A-Za-z0-9])(L[1-4])(?![A-Za-z0-9])', cell_id)
     if match is None:
         raise ValueError(f"Cannot extract larval stage from cell_id: {cell_id!r}")
     return match.group(1)
@@ -742,8 +746,19 @@ def concentration_gc(raw_img:np.array, raw_bg_subt:np.array, background_mask:np.
     # measure nuclear area
     # nuclear_area = round((np.count_nonzero(nucleus_mask) *(0.08*0.08)), 3)
 
-    # add to dataframe
-    df.loc[0,df.columns] = pd.Series([cell_id,bg_value,dilute_value,gc_value,total_value,pc_value],index=df.columns)
+    # add to dataframe by column name (order of measured_parameters must not matter)
+    value_by_name = {
+        "cell_id": cell_id,
+        "C_bg": bg_value,
+        "C_dilute": dilute_value,
+        "C_dense": gc_value,
+        "C_total": total_value,
+        "total": total_value,
+        "pc": pc_value,
+    }
+    for key in measured_parameters:
+        if key in value_by_name:
+            df.loc[0, key] = value_by_name[key]
 
     df["stage"] = extract_stage(cell_id)
 

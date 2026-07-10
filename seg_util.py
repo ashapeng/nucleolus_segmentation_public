@@ -372,10 +372,13 @@ def global_otsu(
             vol = np.count_nonzero(as_id)
             mask_id_size["{}".format(id)]=vol
             logger.debug("mask object %d volume: %d voxels", id, vol)
-        max_mask_vol_id = int(max(mask_id_size,key=mask_id_size.get))
-        segmented_data = np.logical_or(
-            np.zeros_like(global_mask),labeled_mask == max_mask_vol_id
-            )
+        if not mask_id_size:
+            segmented_data = np.zeros_like(global_mask, dtype=bool)
+        else:
+            max_mask_vol_id = int(max(mask_id_size,key=mask_id_size.get))
+            segmented_data = np.logical_or(
+                np.zeros_like(global_mask),labeled_mask == max_mask_vol_id
+                )
     else:
         segmented_data = global_mask
     
