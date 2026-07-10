@@ -1,45 +1,50 @@
-# package for image read, write, work on images as ndim array
-# import some basic functions
-import os
-import re
-import math
-import glob
+"""Nucleolus / GC segmentation utilities built on AllenCell segmenter primitives."""
+
+from __future__ import annotations
+
 import logging
+from typing import Optional
 
 import numpy as np
-
-logger = logging.getLogger(__name__)
-from skimage import io
-from typing import Dict, List
-import matplotlib.pyplot as plt
-
-##############################################################
-# import self_defined functions for segmentation based ALL ###
-##############################################################
-
-# pre-segmentation image process on raw image
-from aicssegmentation.core.pre_processing_utils import (
-    intensity_normalization, suggest_normalization_param, 
-    image_smoothing_gaussian_3d,image_smoothing_gaussian_slice_by_slice)
-
 from scipy import ndimage as ndi
+from skimage.filters import threshold_otsu, threshold_triangle
+from skimage.measure import label
+from skimage.morphology import (
+    ball,
+    binary_closing,
+    binary_dilation,
+    binary_erosion,
+    binary_opening,
+    disk,
+    remove_small_holes,
+    remove_small_objects,
+)
 
-# segmentation core function
-from skimage.filters import threshold_otsu,threshold_triangle
-
-# spot segmentation core function
+from aicssegmentation.core.pre_processing_utils import (
+    image_smoothing_gaussian_3d,
+    image_smoothing_gaussian_slice_by_slice,
+    intensity_normalization,
+    suggest_normalization_param,
+)
 from aicssegmentation.core.seg_dot import dot_2d_slice_by_slice_wrapper
+
 import round_numbers as rn
 
-# import functions for local threshold
-from skimage.measure import regionprops,label,marching_cubes,mesh_surface_area
+logger = logging.getLogger(__name__)
 
-# import function for post-segmentation image process
-from skimage.morphology import remove_small_objects, remove_small_holes,binary_erosion,ball,disk,binary_dilation,binary_closing,binary_opening
+_GLOBAL_THRESH = {
+    "tri": "triangle",
+    "triangle": "triangle",
+    "med": "median",
+    "median": "median",
+    "ave": "ave_tri_med",
+    "ave_tri_med": "ave_tri_med",
+}
 
-##############################################################
-##              core functions end                         ###
-##############################################################
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
 
 def _percentile_clip_and_normalize(img: np.ndarray, percentile: float = 99.9) -> np.ndarray:
     """Clip to given percentile then min-max normalize to [0, 1]."""
@@ -57,505 +62,311 @@ def _to_uint8_mask(arr: np.ndarray) -> np.ndarray:
     return out
 
 
-def image_2d_seg(raw_img: np.array, nucleus_mask: None, sigma_2d: float) -> np.array:
-    '''
-    This to segment the maximal porjection of z-stack images
-     ----------
-    Parameters:
-    -----------
-    raw_img: nD array
-        The raw image array z-stack  multichannel image
-    nucleus_mask: nD array
-        The one slice nucleus mask array
-    sigma_2d: float
-        sigma of gaussian filter used for smoothing
-    Returns:
-    --------
-    2d_seg: nD array after substracting background
-    '''
-    # check if image is multichannel, if not, add channel dimension
-    img_dimension = raw_img.ndim
-    if img_dimension == 3:
-        raw_img = np.expand_dims(raw_img, axis=-1)
-    
-    # maximal projection
-    max_projection = np.stack([np.max(raw_img[...,channel],axis=0) for channel in range(raw_img.shape[-1])],axis=2)
+def _zero_z_cap_slices(vol: np.ndarray) -> np.ndarray:
+    """Zero the first and last Z slices in-place and return the volume."""
+    vol[0] = 0
+    vol[-1] = 0
+    return vol
 
-    # clip to 99.9th percentile and min-max normalize per channel
-    normalized_max_projection_truncated = np.stack(
-        [_percentile_clip_and_normalize(max_projection[..., c]) for c in range(max_projection.shape[-1])],
-        axis=2)
-    
-    # smooth
-    smoothed_2d = np.stack([ndi.gaussian_filter(normalized_max_projection_truncated[...,channel],sigma=sigma_2d,mode="nearest",truncate=3) for channel in range(normalized_max_projection_truncated.shape[-1])],axis=2)
 
-    # segment with otsu
-    thresholded = np.zeros_like(smoothed_2d)
-    
-    # regional segmentation in the nucleus, only keep signal within the nucleus mask use it to calculate the threshold
-    if nucleus_mask is not None:
-        smoothed_updated = np.stack([np.where(nucleus_mask[0,...]>0,smoothed_2d[...,i],0) for i in range(smoothed_2d.shape[-1])],axis=2)
-        
-        for i in range(smoothed_2d.shape[-1]):
-            cutoff1 = threshold_otsu(smoothed_updated[...,i][smoothed_updated[...,i]>0])
-            thresholded[...,i] = np.where(smoothed_2d[...,i]>cutoff1,1,0)
+def _largest_label_mask(labeled: np.ndarray) -> np.ndarray:
+    """Return a boolean mask of the largest connected component in a labelled image."""
+    if labeled.max() == 0:
+        return np.zeros(labeled.shape, dtype=bool)
+    counts = np.bincount(labeled.ravel())
+    counts[0] = 0  # ignore background
+    return labeled == int(counts.argmax())
 
-    else:
-        for i in range(smoothed_2d.shape[-1]):
-            cutoff1 = threshold_otsu(smoothed_2d[...,i][smoothed_2d[...,i]>0])
-            thresholded[...,i] = np.where(smoothed_2d[...,i]>cutoff1,1,0)
 
-    # post segmentation processing: close holes and remove small objects
-    post_seg = np.zeros_like(thresholded,dtype = np.uint8)
-    for i in range(thresholded.shape[-1]):
-        each = thresholded[...,i]
-        opened = binary_opening(each,footprint=np.ones((3,3))).astype(bool)
-        holed_filled = remove_small_holes(opened)
-        
-        # only keep the largest object
-        labeled = label(holed_filled,connectivity=2)
-        props = regionprops(labeled)
-        
-        # Find the label of the largest object
-        largest_label = np.argmax([prop.area for prop in props]) + 1
-        post_seg[...,i] = labeled == largest_label
-        post_seg[...,i][post_seg[...,i]>0] = 255
+def _round_threshold(value: float) -> float:
+    """Round a threshold up to two significant fractional digits."""
+    return rn.round_up(value, rn.decimal_num(value, two_digit=True))
+
+
+def _apply_per_slice(vol: np.ndarray, fn) -> np.ndarray:
+    """Apply a 2D function to each Z slice; returns a new array."""
+    out = np.empty_like(vol)
+    for z in range(vol.shape[0]):
+        out[z] = fn(vol[z])
+    return out
+
+
+# ---------------------------------------------------------------------------
+# public API
+# ---------------------------------------------------------------------------
+
+def image_2d_seg(raw_img: np.ndarray, nucleus_mask: Optional[np.ndarray], sigma_2d: float) -> np.ndarray:
+    """Segment the maximal Z-projection of a multi-channel stack with Otsu.
+
+    Parameters
+    ----------
+    raw_img : ndarray
+        Z-stack, shape (Z, Y, X) or (Z, Y, X, C).
+    nucleus_mask : ndarray or None
+        Optional nucleus mask; when given, Otsu is computed only inside it.
+    sigma_2d : float
+        Gaussian smoothing sigma applied to the projection.
+    """
+    if raw_img.ndim == 3:
+        raw_img = raw_img[..., np.newaxis]
+
+    max_projection = np.max(raw_img, axis=0)  # (Y, X, C)
+    n_channels = max_projection.shape[-1]
+
+    normalized = np.stack(
+        [_percentile_clip_and_normalize(max_projection[..., c]) for c in range(n_channels)],
+        axis=-1,
+    )
+    smoothed = np.stack(
+        [
+            ndi.gaussian_filter(normalized[..., c], sigma=sigma_2d, mode="nearest", truncate=3)
+            for c in range(n_channels)
+        ],
+        axis=-1,
+    )
+
+    thresholded = np.zeros_like(smoothed)
+    for i in range(n_channels):
+        channel = smoothed[..., i]
+        if nucleus_mask is not None:
+            masked = np.where(nucleus_mask[0] > 0, channel, 0)
+            positives = masked[masked > 0]
+        else:
+            positives = channel[channel > 0]
+        if positives.size == 0:
+            continue
+        cutoff = threshold_otsu(positives)
+        thresholded[..., i] = channel > cutoff
+
+    post_seg = np.zeros_like(thresholded, dtype=np.uint8)
+    for i in range(n_channels):
+        opened = binary_opening(thresholded[..., i], footprint=np.ones((3, 3)))
+        filled = remove_small_holes(opened)
+        labeled = label(filled, connectivity=2)
+        if labeled.max() == 0:
+            continue
+        post_seg[..., i] = _to_uint8_mask(_largest_label_mask(labeled))
     return post_seg
 
-def bg_subtraction(raw_img: np.array, bg_mask: np.array, clip: bool = False) -> np.ndarray:
-    """
-        Subtract background from raw image with known background mask
-    """
 
+def bg_subtraction(raw_img: np.ndarray, bg_mask: np.ndarray, clip: bool = False) -> np.ndarray:
+    """Subtract mean background intensity (from ``bg_mask``) per channel.
+
+    Negative values after subtraction are left as-is unless ``clip=True``.
     """
-        Background subtraction is typically used to enhance the contrast between the foreground objects and the background in an image, making it easier to segment the objects. 
-        This process involves subtracting the background signal from the image, leaving only the foreground objects. 
-    """
-    
-    """
-        If you have negative intensity values after background subtraction, there are several ways to handle them before normalizing your images:
+    out = raw_img.astype(raw_img.dtype, copy=True)
 
-        Clip the negative values to zero: This means that you simply set any negative values to zero, effectively removing any negative values from your image. In my image analysis since negative pixel values represent regions outside cells or regions dimmer that the chosen background and do not provide useful information about the image content, and that they can safely be discarded.
+    if raw_img.ndim == 4:
+        for z in range(bg_mask.shape[0]):
+            bg_slice = bg_mask[z] > 0
+            if not np.any(bg_slice):
+                continue
+            for ch in range(raw_img.shape[-1]):
+                bg_pixels = raw_img[z, ..., ch][bg_slice]
+                bg_pixels = bg_pixels[bg_pixels > 0]
+                if bg_pixels.size == 0:
+                    continue
+                out[z, ..., ch] = raw_img[z, ..., ch] - np.mean(bg_pixels)
+                if clip:
+                    np.clip(out[z, ..., ch], 0, None, out=out[z, ..., ch])
 
-        Shift the intensity values: This means that you add a constant value to all intensity values, such that the minimum intensity value becomes zero. By shifting the intensity values to be non-negative, you can ensure that all intensity values are valid and can be used for further processing or analysis.
-
-        Apply a log transform: A log transform can be used to transform the intensity values to a more linear scale, while preserving the relative differences between the values. This can be particularly useful if your data has a large dynamic range or if you want to highlight differences between low-intensity values.
-
-        Use a different normalization method: min-max normalization scales the intensity values to a fixed range of values, such as [0, 1], which can ensure that all values are positive. Alternatively, z-score normalization scales the intensity values to have a mean of zero and a standard deviation of one.
-    """
-
-    """
-    ----------
-    Parameters:
-    -----------
-    raw_img: nD array
-        The raw image array having 3 channels
-    bg_mask: 3D array
-        The mask array for calculating bg_mask intensity
-    
-    Returns:
-    --------
-    bg_substracted: nD array after substracting background
-    """
-    # check if image is 3D/2D
-    img_dimension = raw_img.ndim
-
-    # bg subtraction
-    bg_substracted = np.zeros_like(raw_img,dtype=raw_img.dtype)
-    if img_dimension == 4:
-        for channel in range(raw_img.shape[-1]):
-            for z in range(bg_mask.shape[0]):
-                if np.count_nonzero(bg_mask[z,:,:])>0:
-                    # Extract background pixels from raw_img using mask from bg_mask
-                    bg_raw = np.where(np.logical_and(bg_mask[z,:,:],raw_img[z,:,:,channel]),raw_img[z,:,:,channel],0)
-                    
-                    # Calculate mean background intensity
-                    mean_bg = np.mean(bg_raw[bg_raw>0])
-                    
-                    # Subtract background from raw_img and clip negative values to zero
-                    bg_substracted[z,:,:,channel] = raw_img[z,:,:,channel] - mean_bg
-
-                    if clip:
-                        bg_substracted[z,:,:,channel] = np.clip(bg_substracted[z,:,:,channel],a_min=0,a_max=None)
-    
-    elif img_dimension == 3:
-        bg_mask_2d = np.max(bg_mask,axis=0)
-        for channel in range(raw_img.shape[-1]):
-            # Extract background pixels from raw_img using mask from bg_mask
-            bg_raw = np.where(bg_mask_2d,raw_img[...,channel],0)
-            
-            # Calculate mean background intensity
-            mean_bg = np.mean(bg_raw[bg_raw>0])
-            
-            # Subtract background from raw_img and clip negative values to zero
-            bg_substracted[...,channel] = raw_img[...,channel] - mean_bg
-            
+    elif raw_img.ndim == 3:
+        bg_2d = np.max(bg_mask, axis=0) > 0
+        for ch in range(raw_img.shape[-1]):
+            bg_pixels = raw_img[..., ch][bg_2d]
+            bg_pixels = bg_pixels[bg_pixels > 0]
+            if bg_pixels.size == 0:
+                continue
+            out[..., ch] = raw_img[..., ch] - np.mean(bg_pixels)
             if clip:
-                bg_substracted[...,channel] = np.clip(bg_substracted[...,channel],a_min=0,a_max=None)
-    
-    return bg_substracted
+                np.clip(out[..., ch], 0, None, out=out[..., ch])
 
-def min_max_norm(raw_img:np.array, suggest_norm: bool=False)-> np.ndarray:
-    """
-        formula:
+    return out
 
-        X_norm = (X - X_min) / (X_max - X_min)
 
-    """
-    '''
-    Parameters:
-    -----------
-    raw_img: 3D array
-        
-    suggest_norm: bool
-        whether use suggested scaling for min-max normalization image by Allen segmenter
-    
-    Returns:
-    --------
-    normalized_data: 3D array
-        images after normalization
-    '''
-    # Make a copy of the data
-    raw = raw_img.copy()
-
+def min_max_norm(raw_img: np.ndarray, suggest_norm: bool = False) -> np.ndarray:
+    """Min-max intensity normalization via AllenCell ``intensity_normalization``."""
     if suggest_norm:
-        # Get suggested scaling parameters
-        low_ratio,up_ratio=suggest_normalization_param(raw)
-        intensity_scaling_param = [low_ratio, up_ratio]
+        low_ratio, up_ratio = suggest_normalization_param(raw_img)
+        scaling_param = [low_ratio, up_ratio]
     else:
-        intensity_scaling_param = [0]
-    
-    # Normalize the data
-    normalized_data = intensity_normalization(raw, scaling_param=intensity_scaling_param)
+        scaling_param = [0]
+    return intensity_normalization(raw_img.copy(), scaling_param=scaling_param)
 
-    return normalized_data
 
-def gaussian_smooth_stack(img:np.array,sigma:list):
-    '''
-        The sigma parameter controls the standard deviation of the Gaussian distribution, which determines the amount of smoothing applied to the image. The larger the sigma, the more the image is smoothed. The truncate parameter controls the size of the kernel, and it specifies how many standard deviations of the Gaussian distribution should be included in the kernel. By default, truncate is set to 4.0.
-        The size of the kernel can be calculated using the formula:
-        kernel_size = ceil(truncate * sigma * 2 + 1)
-        where ceil is the ceiling function that rounds up to the nearest integer.
-        For example, if sigma is 1.5 and truncate is 4.0, the kernel size will be:
-        kernel_size = ceil(4.0 * 1.5 * 2 + 1) = ceil(12.0 + 1) = 13
-        Therefore, the size of the kernel for ndi.gaussian_filter in this case will be 13x13.
-        Note that the kernel size is always an odd integer to ensure that the center of the kernel is located on a pixel.
-    '''
-    '''
-    Parameters:
-    -----------
-    data1: 3D array
-        The data to be smoothed, as [plane,row,column],single channel
-    sigma_by_channel: Dictionary 
-        a dictionary of sigma for guassian smoothing ordered as each channel
-    Returns:
-    --------
-    smoothed_data: 3D array
-        images after gaussian smoothing
-    '''
-    if len(sigma)>1:
-        # 3d smooth
-        smoothed_data = image_smoothing_gaussian_3d(img,sigma=sigma,truncate_range=3.0)
-    else:
-        # gaussian smoothing slice-by-slice
-        smoothed_data = image_smoothing_gaussian_slice_by_slice(img,sigma=sigma[0],truncate_range=3.0)
-    
-    return smoothed_data
+def gaussian_smooth_stack(img: np.ndarray, sigma: list) -> np.ndarray:
+    """Gaussian smooth a single-channel stack (3D if ``len(sigma)>1``, else slice-wise)."""
+    if len(sigma) > 1:
+        return image_smoothing_gaussian_3d(img, sigma=sigma, truncate_range=3.0)
+    return image_smoothing_gaussian_slice_by_slice(img, sigma=sigma[0], truncate_range=3.0)
+
 
 def global_otsu(
-        img:np.ndarray, mask:np.ndarray,global_thresh_method: str, 
-        mini_size:float, local_adjust:float=0.98, extra_criteria: bool=False, 
-        return_object:bool = False, keep_largest: bool=False):
-    '''
-        Use Allen segmenter Implementation of "Masked Object Thresholding" algorithm. Specifically, the algorithm is a hybrid thresholding method combining two levels of thresholds.
-        The steps are [1] a global threshold is calculated, [2] extract each individual
-        connected componet after applying the global threshold, [3] remove small objects,
-        [4] within each remaining object, a local Otsu threshold is calculated and applied
-        with an optional local threshold adjustment ratio (to make the segmentation more
-        and less conservative). An extra check can be used in step [4], which requires the
-        local Otsu threshold larger than 1/3 of global Otsu threhsold and otherwise this
-        connected component is discarded.
-    '''
-    '''
-        Parameters:
-        -----------
-        img: 3D array
-            The image that has been smoothed, as [plane,row,column],single channel
-        mask: 3D array
-            The array within which otsu threshold for img is processed
-        global_thresh_method: str
-            which method to use for calculating global threshold. Options include:
-            "triangle" (or "tri"), "median" (or "med"), and "ave_tri_med" (or "ave").
-            "ave" refers the average of "triangle" threshold and "mean" threshold.
-        mini_size: float
-            the size filter for excluding small object before applying local threshold
-        local_adjust: float 
-            a ratio to apply on local threshold, default is 0.98
-        extra_criteria: bool
-            whether to use the extra check when doing local thresholding, default is False
-        return_object: bool
-            whether return the low level threshold
-        keep_largest: bool
-        whether only keep the largest mask
-    
-    Returns:
-    --------
-    segmented_data: 3D array
-        images after otsu segmentation
+    img: np.ndarray,
+    mask: np.ndarray,
+    global_thresh_method: str,
+    mini_size: float,
+    local_adjust: float = 0.98,
+    extra_criteria: bool = False,
+    return_object: bool = False,
+    keep_largest: bool = False,
+):
+    """Masked-object hybrid thresholding (global + per-object local Otsu).
 
-    '''
-    # segment images
-    if global_thresh_method == "tri" or global_thresh_method == "triangle":
+    ``global_thresh_method``: ``"triangle"``/``"tri"``, ``"median"``/``"med"``,
+    or ``"ave_tri_med"``/``"ave"``.
+    """
+    method = _GLOBAL_THRESH.get(global_thresh_method)
+    if method is None:
+        raise ValueError(f"Unknown global_thresh_method: {global_thresh_method!r}")
+
+    if method == "triangle":
         th_low_level = threshold_triangle(img)
-    elif global_thresh_method == "med" or global_thresh_method == "median":
+    elif method == "median":
         th_low_level = np.percentile(img, 50)
-    elif global_thresh_method == "ave" or global_thresh_method == "ave_tri_med":
-        global_tri = threshold_triangle(img)
-        global_median = np.percentile(img, 50)
-        th_low_level = (global_tri + global_median) / 2
+    else:
+        th_low_level = (threshold_triangle(img) + np.percentile(img, 50)) / 2
 
-    bw_low_level = img > th_low_level
-    bw_low_level = remove_small_objects(
-        bw_low_level, min_size=mini_size, connectivity=1)
+    bw_low_level = remove_small_objects(img > th_low_level, min_size=mini_size, connectivity=1)
     bw_low_level = binary_dilation(bw_low_level, footprint=ball(1))
-    # set top and bottom slice as zero
-    bw_low_level[0,:,:]=0
-    bw_low_level[-1,:,:]=0
+    _zero_z_cap_slices(bw_low_level)
 
-    # local otsu
     bw_high_level = np.zeros_like(bw_low_level)
     lab_low, num_obj = label(bw_low_level, return_num=True, connectivity=1)
-    if extra_criteria:
-        local_cutoff = 0.333 * threshold_otsu(img[mask>0])
-        for idx in range(num_obj):
-            single_obj = lab_low == (idx + 1)
-            local_otsu = threshold_otsu(img[single_obj > 0])
-            final_otsu = rn.round_up(local_otsu, rn.decimal_num(local_otsu, two_digit=True))
-            #final_otsu = math.ceil(local_otsu)
-            logger.debug("otsu=%.4f  rounded=%.4f  adjusted=%.4f", local_otsu, final_otsu, final_otsu * local_adjust)
-            if local_otsu > local_cutoff:
-                bw_high_level[
-                    np.logical_and(
-                        img > final_otsu * local_adjust, single_obj
-                    )
-                ] = 1
-    else:
-        for idx in range(num_obj):
-            single_obj = lab_low == (idx + 1)
-            local_otsu = threshold_otsu(img[single_obj > 0])
-            final_otsu = rn.round_up(local_otsu, rn.decimal_num(local_otsu, two_digit=True))
-            logger.debug("otsu=%.4f  rounded=%.4f  adjusted=%.4f", local_otsu, final_otsu, final_otsu * local_adjust)
-            bw_high_level[
-                np.logical_and(
-                    img > final_otsu * local_adjust, single_obj
-                )
-            ] = 1
+    local_cutoff = (0.333 * threshold_otsu(img[mask > 0])) if extra_criteria else None
 
-    # post segmentation process: 
-    # remove small dispersed obj and fill holes in each slice
-    global_mask = np.zeros_like(bw_high_level)
-    for z in range(bw_high_level.shape[0]):
-        global_mask[z,:,:] = binary_closing(bw_high_level[z,:,:], footprint=disk(2))
-        global_mask[z,:,:] = remove_small_holes(global_mask[z,:,:].astype(bool), area_threshold=np.count_nonzero(global_mask[z,:,:]),connectivity=2)
-        global_mask[z,:,:] = remove_small_objects(global_mask[z,:,:].astype(bool), min_size=30,connectivity=2)
-    # set the top and bottom as zero
-    global_mask[0,:,:]=0
-    global_mask[-1,:,:]=0
+    for idx in range(1, num_obj + 1):
+        single_obj = lab_low == idx
+        local_otsu = threshold_otsu(img[single_obj])
+        final_otsu = _round_threshold(local_otsu)
+        logger.debug(
+            "otsu=%.4f  rounded=%.4f  adjusted=%.4f",
+            local_otsu, final_otsu, final_otsu * local_adjust,
+        )
+        if local_cutoff is not None and local_otsu <= local_cutoff:
+            continue
+        bw_high_level[np.logical_and(img > final_otsu * local_adjust, single_obj)] = 1
 
-    # only keep the largest label
+    def _close_fill_clean(slice_2d: np.ndarray) -> np.ndarray:
+        closed = binary_closing(slice_2d, footprint=disk(2))
+        filled = remove_small_holes(
+            closed.astype(bool), area_threshold=np.count_nonzero(closed), connectivity=2
+        )
+        return remove_small_objects(filled, min_size=30, connectivity=2)
+
+    global_mask = _apply_per_slice(bw_high_level, _close_fill_clean)
+    _zero_z_cap_slices(global_mask)
+
     if keep_largest:
-        labeled_mask,label_mask_num = label(global_mask, return_num=True, connectivity=1)
-        logger.debug("number of mask objects: %d", label_mask_num)
-        mask_id_size = {}
-        for id in range(1, label_mask_num+1,1):
-            as_id = labeled_mask==id
-            vol = np.count_nonzero(as_id)
-            mask_id_size["{}".format(id)]=vol
-            logger.debug("mask object %d volume: %d voxels", id, vol)
-        max_mask_vol_id = int(max(mask_id_size,key=mask_id_size.get))
-        segmented_data = np.logical_or(
-            np.zeros_like(global_mask),labeled_mask == max_mask_vol_id
-            )
+        labeled_mask, n_labels = label(global_mask, return_num=True, connectivity=1)
+        logger.debug("number of mask objects: %d", n_labels)
+        segmented = _largest_label_mask(labeled_mask)
     else:
-        segmented_data = global_mask
-    
-    # dilate
-    dilated_mask = np.zeros_like(segmented_data)
-    for z in range(segmented_data.shape[0]):
-        dilated_mask[z,:,:] = binary_dilation(segmented_data[z,:,:].astype(bool),footprint=disk(1))
-        #
-        dilated_mask[z,:,:] = binary_closing(dilated_mask[z,:,:].astype(bool),footprint=ndi.generate_binary_structure(2,2))
-        dilated_mask[z,:,:] = remove_small_holes(dilated_mask[z,:,:].astype(bool), area_threshold=np.count_nonzero(dilated_mask[z,:,:]),connectivity=2)
-    # set the top and bottom as zero
-    dilated_mask[0,:,:]=0
-    dilated_mask[-1,:,:]=0
-    
+        segmented = global_mask
+
+    struct2 = ndi.generate_binary_structure(2, 2)
+
+    def _dilate_close_fill(slice_2d: np.ndarray) -> np.ndarray:
+        dilated = binary_dilation(slice_2d.astype(bool), footprint=disk(1))
+        closed = binary_closing(dilated, footprint=struct2)
+        return remove_small_holes(
+            closed, area_threshold=np.count_nonzero(closed), connectivity=2
+        )
+
+    dilated_mask = _apply_per_slice(segmented, _dilate_close_fill)
+    _zero_z_cap_slices(dilated_mask)
+    result = dilated_mask > 0
+
     if return_object:
-        return dilated_mask > 0, bw_low_level
-    else:
-        return dilated_mask > 0
+        return result, bw_low_level
+    return result
+
 
 def segment_spot(
-        raw_img:np.ndarray, nucleus_mask:np.ndarray, nucleolus_mask:np.ndarray,
-        LoG_sigma:list, mini_size: float, 
-        invert_raw: bool=False, show_param: bool=False,arbitray_cutoff:bool=False):
-    
-    """
-        * edge detect with ndi.gaussian_laplace(LoG filter): applies a Gaussain filter first to remove noise and then applies a Laplacian filter to detect edges
+    raw_img: np.ndarray,
+    nucleus_mask: np.ndarray,
+    nucleolus_mask: np.ndarray,
+    LoG_sigma: list,
+    mini_size: float,
+    invert_raw: bool = False,
+    show_param: bool = False,
+    arbitray_cutoff: bool = False,  # typo kept for API compatibility
+):
+    """Detect dark/bright spots with multi-scale LoG filtering inside the nucleolus."""
+    del arbitray_cutoff  # API compatibility only
+    spot = (np.max(raw_img) - raw_img) if invert_raw else raw_img.copy()
 
-        * in practice, an input image is noisy, the high-frequency components of the image can dominate the LoG filter's output, leading to spurious edge detections and other artifacts. To mitigate this problem, the input image is typically smoothed with a Gaussian filter before applying the LoG filter.
+    nucleus_mask_eroded = binary_erosion(nucleus_mask, footprint=ball(2))
+    _zero_z_cap_slices(nucleus_mask_eroded)
+    eroded_bool = nucleus_mask_eroded.astype(bool)
 
-        * It is common practice to apply a Gaussian smoothing filter to an image before applying the Laplacian of Gaussian operator to enhance the edges and features in the image.
-        
-        * A common approach is to use a value of sigma for the Laplacian of Gaussian filter that is larger than the sigma value used for the Gaussian smoothing filter. This is because the Gaussian smoothing filter removes high-frequency details from the image, which can make it difficult to distinguish features in the Laplacian of Gaussian filter output. By using a larger sigma value for the Laplacian of Gaussian filter, you can enhance larger features in the image without being affected by the smoothing effect of the Gaussian filter.
-
-        However, the choice of sigma value for the Laplacian of Gaussian filter ultimately depends on the specific characteristics of the image and the desired level of feature enhancement. It's a good practice to experiment with different values of sigma for the Laplacian of Gaussian filter to find the best value for your specific image and application. 
-
-        *  it is possible that smoothing the input image with a Gaussian filter before applying the Laplacian filter can cause over-smoothing, which may result in loss of detail or blurring of edges.
-
-        The degree of smoothing depends on the size of the Gaussian kernel used in the filter. A larger kernel size corresponds to a stronger smoothing effect, while a smaller kernel size provides less smoothing. If the kernel size is too large, the filter may blur important features and reduce the contrast between different parts of the image.
-
-        Therefore, it is important to choose an appropriate kernel size for the Gaussian filter based on the characteristics of the input image and the specific application requirements. If the input image is already relatively smooth, applying a Gaussian filter with a large kernel size may lead to over-smoothing and reduce the edge detection accuracy. On the other hand, if the input image is very noisy, a larger kernel size may be necessary to reduce the noise level effectively.
-
-        the LoG kernel size is automatically calculated by:
-        kernel_size = int(4 * sigma + 1)
-    """
-    """
-        -----------
-        raw_img: 3D array
-            Raw image
-        nucleus_mask: 3D array
-            The binary mask within which LoG cutoff is kept
-        nucleolus_mask: 3D array
-            The mask generated by global thresholding in which keep LoG
-        LoG_sigma: list
-            sigma range for LoG: based on estimated spot size range
-        mini_size: float
-            the minimum size of spot
-        invert_raw: bool=False
-            whether invert data1 or not, for vacuole True
-        
-        Returns:
-        --------
-        data1: 3D array
-            binary spot mask
-    """
-
-    # check if inverting image
-    if invert_raw:
-        spot = np.max(raw_img) - raw_img
-    else:
-        spot = raw_img.copy()
-    
-    # mask region to apply LoG filter
-    nucleus_mask_eroded = binary_erosion(nucleus_mask,footprint=ball(2))
-    nucleus_mask_eroded[0,:,:]=0
-    nucleus_mask_eroded[-1,:,:]=0
-
-    # set LoG cutoff
     param_spot = []
-    # transfer data into LoG form
-    for LoG in LoG_sigma:
-        spot_temp = np.zeros_like(spot)
+    for sigma in LoG_sigma:
+        spot_temp = np.empty_like(spot, dtype=np.float64)
         for z in range(spot.shape[0]):
-            spot_temp[z, :, :] = -1 * (LoG**2) * ndi.filters.gaussian_laplace(spot[z, :, :], LoG)
+            spot_temp[z] = -(sigma ** 2) * ndi.gaussian_laplace(spot[z], sigma)
 
-        # only keep LoG value within nucleus_mask_eroded to avoide bright "noise"
-        LoG_in_mask = []
-        for id in np.argwhere(nucleus_mask_eroded):
-            LoG_in_mask.append(spot_temp[id[0],id[1],id[2]])
+        log_in_mask = spot_temp[eroded_bool]
+        p96 = float(np.percentile(log_in_mask, 96))
+        param_spot.append([sigma, _round_threshold(p96)])
 
-        # calculate cut_off & check mean of LoG with different region size
-        cut_off = rn.round_up(
-            np.percentile(LoG_in_mask,96), 
-            rn.decimal_num(np.percentile(LoG_in_mask,96),two_digit=True))
-        param_spot.append([LoG,cut_off])
-
-    # set cutoff as a mean
-    cutoff_mean = np.mean(np.array(param_spot),axis=0)[1]
+    cutoff_mean = float(np.mean([p[1] for p in param_spot]))
     logger.debug("spot seg mean cutoff value: %.6f", cutoff_mean)
-    updated_param =[ [param_spot[i][0],cutoff_mean] for i in range(len(param_spot))]
+    updated_param = [[p[0], cutoff_mean] for p in param_spot]
     if show_param:
         logger.info("spot seg parameters: %s", param_spot)
         logger.info("spot seg updated parameters: %s", updated_param)
-   
-   # apply LoG filter to spot
-    spot_by_LoG = dot_2d_slice_by_slice_wrapper(spot, updated_param)
 
-    # remove object smaller than a connectivity=2 region slice by slice
-    spot_opened =np.zeros_like(spot_by_LoG)
-    for z in range(spot_by_LoG.shape[0]):
-        spot_opened[z,:,:] = binary_opening(
-            spot_by_LoG[z,:,:],footprint=ndi.generate_binary_structure(2,2))
-        spot_opened[z,:,:] = remove_small_objects(
-            spot_opened[z,:,:],min_size=10,connectivity=2).astype(np.uint8)
-        spot_opened[z,:,:] = binary_closing(
-            spot_opened[z,:,:],footprint=ndi.generate_binary_structure(2,2))
+    spot_by_log = dot_2d_slice_by_slice_wrapper(spot, updated_param)
 
-    # only keep objects within nucleolus_mask
-    spot_in_structure = np.where(np.logical_and(spot_opened,nucleolus_mask),1,0)
+    struct2 = ndi.generate_binary_structure(2, 2)
 
-    # remove objects that only appears in one plane
-    spot_on_multi_z_slices, vac_num = label(spot_in_structure,return_num=True,connectivity=2)
-    for i in range(1,vac_num+1):
-        p,r,c = np.where(spot_on_multi_z_slices==i)
-        if len(set(p))<=2:
-            spot_on_multi_z_slices=np.where(spot_on_multi_z_slices==i,0,spot_on_multi_z_slices)
-    spot_on_multi_z_slices[spot_on_multi_z_slices>0]=1
+    def _open_clean_close(slice_2d: np.ndarray) -> np.ndarray:
+        opened = binary_opening(slice_2d, footprint=struct2)
+        cleaned = remove_small_objects(opened, min_size=10, connectivity=2)
+        return binary_closing(cleaned, footprint=struct2).astype(np.uint8)
 
-    # size thresholding: remove object smaller than mini_size
-    spot_size_threshold = remove_small_objects(spot_on_multi_z_slices.astype(bool),min_size=mini_size,connectivity=2)
-    
-    return _to_uint8_mask(spot_size_threshold)
+    spot_opened = _apply_per_slice(spot_by_log, _open_clean_close)
+    spot_in_structure = np.logical_and(spot_opened, nucleolus_mask).astype(np.uint8)
 
-def final_gc_holes(spot_mask:np.ndarray, nucleolus_mask:np.ndarray):
-    """
-        Parameters:
-        -----------
-        spot_mask: 3D array
-            segmented spot mask with the segment_spot function
-        nucleolus_mask: 3D array
-            nucleolar mask with global_otsu function
-        Returns:
-        --------
-        final_gc: 3D array
-            mask after combined
-        hole_filled_final: 3D array
-            mask after filling holes
-        holes: 3D array
-            holes in the final gc mask
-    """
-    # get final GC mask
+    labeled, n_obj = label(spot_in_structure, return_num=True, connectivity=2)
+    for i in range(1, n_obj + 1):
+        coords = np.argwhere(labeled == i)
+        if len(set(coords[:, 0])) <= 2:
+            labeled[labeled == i] = 0
+    multi_z = labeled > 0
+
+    size_filtered = remove_small_objects(multi_z, min_size=mini_size, connectivity=2)
+    return _to_uint8_mask(size_filtered)
+
+
+def final_gc_holes(spot_mask: np.ndarray, nucleolus_mask: np.ndarray):
+    """Combine nucleolus mask with dark-spot holes; return GC and hole-filled masks."""
     final_gc = nucleolus_mask.copy()
-    final_gc[spot_mask>0]=0
+    final_gc[spot_mask > 0] = 0
 
-    # fill holes in final mask
-    hole_filled_final = np.zeros_like(final_gc)
+    hole_filled = np.zeros_like(final_gc)
     for z in range(final_gc.shape[0]):
-        hole_filled_final[z,:,:] = remove_small_holes(final_gc[z,:,:].astype(bool), area_threshold=np.count_nonzero(nucleolus_mask[z,:,:]),connectivity=2)
-    
+        hole_filled[z] = remove_small_holes(
+            final_gc[z].astype(bool),
+            area_threshold=np.count_nonzero(nucleolus_mask[z]),
+            connectivity=2,
+        )
 
-    return _to_uint8_mask(final_gc), _to_uint8_mask(hole_filled_final)
+    return _to_uint8_mask(final_gc), _to_uint8_mask(hole_filled)
 
-################
-# integrate GC segmentation step into one function
-def gc_segment(raw_image:np.ndarray, nucleus_mask:np.ndarray, sigma: float = None, local_adjust_for_GC: float = None, config=None):
-    '''
-    Parameters:
-    -----------
-    raw_image: nD array
-        The raw data as [plane,row,column, channel]
-    sigma: float
-        the smooth sigma value; overrides config if provided
-    local_adjust_for_GC: float
-        local threshold adjustment ratio; overrides config if provided
-    config: dict, optional
-        configuration dict (from config_loader.load_config); loaded automatically if None
 
-    Returns:
-    --------
-    fina_gc: 3D array, holes: 3D array, hole_filled_gc: 3D array
-    '''
+def gc_segment(
+    raw_image: np.ndarray,
+    nucleus_mask: np.ndarray,
+    sigma: float = None,
+    local_adjust_for_GC: float = None,
+    config=None,
+):
+    """End-to-end granular-component segmentation pipeline.
+
+    Returns ``(final_gc, dark_spot, hole_filled_gc)`` as uint8 masks.
+    """
     if config is None:
         from config_loader import load_config
         config = load_config()
@@ -564,41 +375,48 @@ def gc_segment(raw_image:np.ndarray, nucleus_mask:np.ndarray, sigma: float = Non
         sigma = cfg["sigma"]
     if local_adjust_for_GC is None:
         local_adjust_for_GC = cfg["local_adjust"]
-    mini_size_otsu = cfg["mini_size_otsu"]
-    mini_size_spot = cfg["mini_size_spot"]
-    log_sigma = list(np.arange(cfg["log_sigma_min"], cfg["log_sigma_max"], cfg["log_sigma_step"], dtype=float))
+    log_sigma = list(
+        np.arange(cfg["log_sigma_min"], cfg["log_sigma_max"], cfg["log_sigma_step"], dtype=float)
+    )
 
-    # Make copies of input data
     raw_img = raw_image.copy()
     nucleus_mask = nucleus_mask.copy()
 
-    # normalize images based on min-max normalization
-    normalized_img = np.stack([min_max_norm(raw_img[:,:,:,i]) for i in range(raw_img.shape[-1])],axis=3)
-
-    # 3d smooth raw LPD7 image
-    gc_smoothed_final = ndi.gaussian_filter(normalized_img[...,2],sigma=sigma,mode="nearest",truncate=3)
-
-    # otsu segment each channel as for ground and background
-    # adjust local_adjust parameter to make the segmentation more and less
-    gc_otsu = global_otsu(gc_smoothed_final, nucleus_mask, global_thresh_method="ave",mini_size=mini_size_otsu,local_adjust=local_adjust_for_GC,extra_criteria=False,keep_largest=True)
-
-    # guassian laplace edge detection vacules in GC
-    gc_dark_spot = segment_spot(normalized_img[...,2],nucleus_mask,gc_otsu,LoG_sigma=log_sigma,mini_size=mini_size_spot,invert_raw=True)
-
-    # merge dark spot and gc global mask and only keep holes in final final_gc
+    normalized = np.stack(
+        [min_max_norm(raw_img[..., i]) for i in range(raw_img.shape[-1])],
+        axis=-1,
+    )
+    gc_smoothed = ndi.gaussian_filter(
+        normalized[..., 2], sigma=sigma, mode="nearest", truncate=3
+    )
+    gc_otsu = global_otsu(
+        gc_smoothed,
+        nucleus_mask,
+        global_thresh_method="ave",
+        mini_size=cfg["mini_size_otsu"],
+        local_adjust=local_adjust_for_GC,
+        extra_criteria=False,
+        keep_largest=True,
+    )
+    gc_dark_spot = segment_spot(
+        normalized[..., 2],
+        nucleus_mask,
+        gc_otsu,
+        LoG_sigma=log_sigma,
+        mini_size=cfg["mini_size_spot"],
+        invert_raw=True,
+    )
     final_gc, hole_filled_gc = final_gc_holes(gc_dark_spot, gc_otsu)
-
     return _to_uint8_mask(final_gc), _to_uint8_mask(gc_dark_spot), _to_uint8_mask(hole_filled_gc)
-################
 
-def ball_confocol(radius_xy,radius_z, dtype=np.uint8):
-    # generate 3d ball as footprint, based on the confocol scope in Weber lab
-    # confocol voxel dimension: Z, Y, X = 0.2, 0.0796631, 0.0796631
-    # at 100x X 1.4 NA Z, Y, X = 1, 2.5, 2.5
-    n_xy = 2*radius_xy+1
-    n_z = 2*radius_z+1
-    Z,Y,X = np.mgrid[-radius_z:radius_z:n_z*1j,
-                    -radius_xy:radius_xy:n_xy*1j,
-                    -radius_xy:radius_xy:n_xy*1j]
-    s = X**2 + Y**2 + Z**2
-    return np.array(s<=radius_xy*radius_z,dtype=dtype)
+
+def ball_confocol(radius_xy, radius_z, dtype=np.uint8):
+    """Generate an anisotropic 3D ball footprint for Weber-lab confocal voxels."""
+    n_xy = 2 * radius_xy + 1
+    n_z = 2 * radius_z + 1
+    Z, Y, X = np.mgrid[
+        -radius_z:radius_z:n_z * 1j,
+        -radius_xy:radius_xy:n_xy * 1j,
+        -radius_xy:radius_xy:n_xy * 1j,
+    ]
+    return np.array(X ** 2 + Y ** 2 + Z ** 2 <= radius_xy * radius_z, dtype=dtype)
