@@ -34,7 +34,19 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--stage", default=None, help="Filter to larval stage L1–L4")
     run.add_argument("--max-cells", type=int, default=None, help="Limit number of cells")
     run.add_argument("--with-intensity", action="store_true", help="Also run intensity metrics")
-    run.add_argument("--with-easy-adopt", action="store_true", help="Attach Easy-adopt trust reports if installed")
+    run.add_argument(
+        "--with-easy-adopt",
+        action="store_true",
+        help="Attach Easy-adopt trust reports for each cell if installed",
+    )
+    run.add_argument(
+        "--allow-ml-backend",
+        action="store_true",
+        help=(
+            "Allow ml.default_backend nnunet|cellpose only after a non-RED Easy-adopt "
+            "trust probe (never silent swap from classical)"
+        ),
+    )
     run.add_argument("--runs-base", default="runs", help="Directory for run artifacts")
     return parser
 
@@ -73,6 +85,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 max_cells=args.max_cells,
                 with_intensity=args.with_intensity,
                 with_easy_adopt=args.with_easy_adopt,
+                allow_ml_backend=args.allow_ml_backend,
                 runs_base=args.runs_base,
             )
         else:
@@ -84,6 +97,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 max_cells=args.max_cells,
                 with_intensity=args.with_intensity,
                 with_easy_adopt=args.with_easy_adopt,
+                allow_ml_backend=args.allow_ml_backend,
                 runs_base=args.runs_base,
                 goal=args.goal,
             )

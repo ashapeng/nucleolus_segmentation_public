@@ -149,9 +149,17 @@ def image_2d_seg(raw_img: np.ndarray, nucleus_mask: Optional[np.ndarray], sigma_
     return post_seg
 
 
+def _bg_mask_2d(bg_mask: np.ndarray) -> np.ndarray:
+    """Boolean 2D background mask; max-projects a 3D mask along Z when needed."""
+    if bg_mask.ndim == 3:
+        return np.max(bg_mask, axis=0) > 0
+    return bg_mask > 0
+
+
 def bg_subtraction(raw_img: np.ndarray, bg_mask: np.ndarray, clip: bool = False) -> np.ndarray:
     """Subtract mean background intensity (from ``bg_mask``) per channel.
 
+    Supports ``(Z,Y,X,C)``, ``(Y,X,C)``, and single-channel ``(Y,X)``.
     Negative values after subtraction are left as-is unless ``clip=True``.
     """
     out = raw_img.astype(raw_img.dtype, copy=True)
@@ -171,7 +179,8 @@ def bg_subtraction(raw_img: np.ndarray, bg_mask: np.ndarray, clip: bool = False)
                     np.clip(out[z, ..., ch], 0, None, out=out[z, ..., ch])
 
     elif raw_img.ndim == 3:
-        bg_2d = np.max(bg_mask, axis=0) > 0
+        # (Y, X, C) — do not max-project an already-2D bg mask (that collapses X)
+        bg_2d = _bg_mask_2d(bg_mask)
         for ch in range(raw_img.shape[-1]):
             bg_pixels = raw_img[..., ch][bg_2d]
             bg_pixels = bg_pixels[bg_pixels > 0]
@@ -180,6 +189,17 @@ def bg_subtraction(raw_img: np.ndarray, bg_mask: np.ndarray, clip: bool = False)
             out[..., ch] = raw_img[..., ch] - np.mean(bg_pixels)
             if clip:
                 np.clip(out[..., ch], 0, None, out=out[..., ch])
+
+    elif raw_img.ndim == 2:
+        # (Y, X) single-channel — used by pipeline intensity MIP path
+        bg_2d = _bg_mask_2d(bg_mask)
+        bg_pixels = raw_img[bg_2d]
+        bg_pixels = bg_pixels[bg_pixels > 0]
+        if bg_pixels.size > 0:
+            out = raw_img - np.mean(bg_pixels)
+            if clip:
+                np.clip(out, 0, None, out=out)
+            out = out.astype(raw_img.dtype, copy=False)
 
     return out
 

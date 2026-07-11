@@ -18,6 +18,9 @@ measurement:
   resolution_2d: [0.08, 0.08]
 
 ml:
+  # Production pipeline default is classical. nnunet|cellpose are research backends.
+  # pipeline run ignores a non-classical value unless --allow-ml-backend is set AND
+  # Easy-adopt returns non-RED trust on a probe cell (never a silent swap).
   # Active backend: "classical" | "nnunet" | "cellpose"
   default_backend: classical
 

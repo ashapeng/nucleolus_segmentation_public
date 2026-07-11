@@ -58,3 +58,28 @@ class MaskPaths:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class TrustReport:
+    """Easy-adopt invocation result plus parsed Trust Report traffic light.
+
+    ``invocation`` is process-level: SKIPPED | COMPLETED | FAILED.
+    ``trust_status`` is biological/tool trust: GREEN | AMBER | RED | UNKNOWN | N/A.
+    """
+
+    cell_dir: str
+    tool: str
+    structure: str
+    invocation: str
+    trust_status: str
+    cell_id: Optional[str] = None
+    reason: Optional[str] = None
+    returncode: Optional[int] = None
+    stdout_tail: Optional[str] = None
+    stderr_tail: Optional[str] = None
+    messages: List[str] = field(default_factory=list)
+    escalation: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)

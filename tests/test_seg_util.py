@@ -77,6 +77,40 @@ def test_image_2d_seg_with_nucleus_mask():
 
 
 # ---------------------------------------------------------------------------
+# bg_subtraction — 2D / (Y,X,C) regressions (intensity wrapper bug)
+# ---------------------------------------------------------------------------
+
+def test_bg_subtraction_2d_single_channel_subtracts():
+    """2D (Y,X) must subtract mean positive background (was a silent no-op)."""
+    img = np.full((8, 8), 100.0, dtype=np.float32)
+    img[0:2, 0:2] = 20.0  # background region
+    bg = np.zeros((8, 8), dtype=np.uint8)
+    bg[0:2, 0:2] = 255
+
+    out = su.bg_subtraction(img, bg, clip=True)
+    assert out.shape == img.shape
+    # Foreground 100 - 20 = 80; bg pixels clip to 0
+    assert float(out[4, 4]) == pytest.approx(80.0)
+    assert float(out[0, 0]) == pytest.approx(0.0)
+
+
+def test_bg_subtraction_yxc_with_2d_mask():
+    """(Y,X,C) with a 2D bg mask must not IndexError and must subtract per channel."""
+    img = np.zeros((6, 6, 3), dtype=np.float32)
+    img[..., 0] = 50.0
+    img[..., 1] = 80.0
+    img[..., 2] = 110.0
+    img[0:2, 0:2, :] = 10.0
+    bg = np.zeros((6, 6), dtype=np.uint8)
+    bg[0:2, 0:2] = 255
+
+    out = su.bg_subtraction(img, bg, clip=True)
+    assert out.shape == img.shape
+    assert float(out[3, 3, 2]) == pytest.approx(100.0)  # 110 - 10
+    assert float(out[0, 0, 2]) == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
 # global_otsu
 # ---------------------------------------------------------------------------
 
