@@ -1,42 +1,24 @@
-from numpy import load
+"""Image I/O helpers for nucleolus analysis pipelines."""
+
 import os
+from typing import Optional
+
 import numpy as np
-import re
+from numpy import load
 from skimage import io
-from typing import List
 
-#define a function to import .npy files
-def import_npy(path):
-    #make sure the path to the file exists
+
+def import_npy(path: str) -> Optional[np.ndarray]:
+    """Load a ``.npy`` file; return ``None`` if the path does not exist."""
     if not os.path.exists(path):
-        print('File does not exist')
         return None
-    #load the data
-    data = load(path)
-    return data
+    return load(path)
 
 
-def import_imgs(input_dir: str,image_name: str, is_mask: bool = False):
-    
+def import_imgs(input_dir: str, image_name: str, is_mask: bool = False) -> np.ndarray:
+    """Read an image from ``input_dir/image_name``.
+
+    Masks are returned as ``uint8``; intensity images as ``float32``.
     """
-    Parameters:
-    ----------
-    input_dir: str
-        directory to folders having folders of cells containing raw image, nucleus mask, background mask
-    image_name: list
-        need to include extension
-    is_mask: bool
-        check if the image is a mask (binary image) or not
-
-    Returns: 
-        img: nDarray
-    """
-    img = io.imread(os.path.join(input_dir,image_name))
-    if is_mask:
-        img = img.astype(np.uint8)
-    else:
-        img = img.astype(np.float32)
-    return img
-    
-
-
+    img = io.imread(os.path.join(input_dir, image_name))
+    return img.astype(np.uint8 if is_mask else np.float32)

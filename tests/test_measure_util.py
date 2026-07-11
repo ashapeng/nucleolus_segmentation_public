@@ -142,3 +142,31 @@ def test_config_loader_fallback():
     cfg = load_config(path="/nonexistent/path/config.yaml")
     assert "measurement" in cfg
     assert cfg["measurement"]["resolution_3d"] == [0.2, 0.08, 0.08]
+
+
+# ---------------------------------------------------------------------------
+# concentration_gc — semantic column mapping (refactor regression)
+# ---------------------------------------------------------------------------
+
+def test_concentration_gc_column_mapping():
+    """pc and total must map by name, not by positional Series order."""
+    shape = (5, 16, 16)
+    raw_img = np.ones(shape, dtype=np.float32) * 200
+    raw_bg = np.ones(shape, dtype=np.float32) * 100
+    background_mask = np.zeros(shape, dtype=np.uint8)
+    background_mask[2, 0:3, 0:3] = 1
+    nucleoplasm_mask = np.ones(shape, dtype=np.uint8)
+    nucleoplasm_mask[2, 7:9, 7:9] = 0
+    seg_mask = np.zeros(shape, dtype=np.uint8)
+    seg_mask[2, 7:9, 7:9] = 1
+    # Make GC brighter than nucleoplasm in raw so pc > 1
+    raw_img[seg_mask > 0] = 400
+    hole_filled = seg_mask.copy()
+    nucleus_mask = np.ones(shape, dtype=np.uint8)
+
+    params = ["cell_id", "C_bg", "C_dilute", "C_dense", "pc", "total"]
+    df = mu.concentration_gc(raw_img, raw_bg, background_mask, nucleoplasm_mask,
+                              seg_mask, hole_filled, nucleus_mask,
+                              "L1/cell1", params)
+    assert float(df["pc"].iloc[0]) > 1.0
+    assert float(df["total"].iloc[0]) == 100.0  # mean of raw_bg in nucleus

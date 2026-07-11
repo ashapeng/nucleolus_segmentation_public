@@ -1,814 +1,548 @@
-import numpy as np
-import re
-import os
-import pandas as pd
-import math
-import glob
+"""Mask- and intensity-based measurement utilities for nucleolus analysis."""
+
+from __future__ import annotations
+
 import logging
-from typing import Dict, List, Any
+import os
+import re
+from typing import List
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from skimage.measure import find_contours, label, marching_cubes, mesh_surface_area, regionprops
+from skimage.morphology import ball, binary_dilation, disk
+
+from Import_Functions import import_imgs
 
 logger = logging.getLogger(__name__)
 
-import matplotlib.pyplot as plt
-# import self_defined functions
-import seg_util as su
+SHAPE_PARAMS_3D = [
+    "cell_id", "obj_id", "surface_area", "volume",
+    "surface_to_volume_ratio", "sphericity", "aspect_ratio", "solidity",
+]
 
-from Import_Functions import import_imgs
-from scipy import ndimage as ndi
-from skimage import io, filters
-from scipy.ndimage import gaussian_filter
-from skimage.measure import regionprops,label,marching_cubes,mesh_surface_area, find_contours
-from skimage.morphology import disk,ball,binary_dilation,binary_closing,binary_opening, remove_small_holes
-################################################
-#             mask based analysis              #
-################################################
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
 
 def extract_stage(cell_id: str) -> str:
-    """Extract larval stage (L1–L4) from a cell_id string using a regex.
+    """Extract larval stage (L1–L4) from a cell_id string.
 
     Raises ValueError if the stage cannot be determined.
     """
-    match = re.search(r'\b(L[1-4])\b', cell_id)
+    # Underscores are word chars, so \b fails on IDs like "20220304_L1/..."
+    match = re.search(r"(?<![A-Za-z])(L[1-4])(?![A-Za-z0-9])", cell_id)
     if match is None:
         raise ValueError(f"Cannot extract larval stage from cell_id: {cell_id!r}")
     return match.group(1)
 
 
-def shape_discriber(structure_mask: np.array, resolution:List, cell_id:str, measured_parameters:List):
-    """
-        ----------
-        Parameters:
-        -----------
-        structure_mask: nD array
-            segmented mask
-        
-        resolution: list
-            The resolution of the image: as[z,y,x]
-        
-        cell_id: str
-            the id of the cell: in the form of: 'experiment_set'_'cell folder'
-        
-        measured_parameters: list 
-            the parameters of the measurements as strings
-            should be:["cell_id", "obj_id", "surface_area", "volume" , "surface_to_volume_ratio", "sphericity", "aspect_ratio","solidity"]
-            updated as needed. make sure also update the shape_discriber function
-        
-        Returns:
-        --------
-        df: pandas dataframe
-            measurements stored as dataframe for each cell
-    """
+def _empty_row_df(columns: List[str], index=0) -> pd.DataFrame:
+    """Create a one-row DataFrame with ``None`` placeholders for ``columns``."""
+    return pd.DataFrame({c: None for c in columns}, index=[index] if np.isscalar(index) else index)
 
-    #  expand the cavas to avoid the object touching the boundary
-    structure_mask = np.pad(structure_mask,5,'constant',constant_values=0)
 
-    # label object with distinct number and return object dataframe
+def _assign_row(df: pd.DataFrame, index, values: dict) -> None:
+    """Assign ``values`` (column -> value) into ``df`` at ``index``."""
+    for col, val in values.items():
+        df.loc[index, col] = val
+
+
+def _add_stage_column(df: pd.DataFrame, cell_id_col: str = "cell_id") -> pd.DataFrame:
+    """Return a copy of ``df`` with a ``stage`` column derived from ``cell_id``."""
+    out = df.copy()
+    out["stage"] = out[cell_id_col].map(extract_stage)
+    return out
+
+
+def _sort_by_stage(df: pd.DataFrame) -> pd.DataFrame:
+    return df.sort_values(by="stage", ascending=True).reset_index(drop=True)
+
+
+def _masked_channels(raw_img: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Zero out pixels outside ``mask`` for every channel of ``raw_img``."""
+    mask_bool = mask > 0
+    return np.where(mask_bool[..., np.newaxis], raw_img, 0)
+
+
+def _to_uint8_binary(arr: np.ndarray) -> np.ndarray:
+    out = arr.astype(np.uint8)
+    out[out > 0] = 255
+    return out
+
+
+def _cv_qcd(values: np.ndarray) -> tuple:
+    """Return (coefficient of variation, quartile coefficient of dispersion)."""
+    mean = np.mean(values)
+    cv = round(float(np.std(values) / mean), 3) if mean != 0 else float("nan")
+    q1, q3 = np.quantile(values, [0.25, 0.75])
+    qcd = round(float((q3 - q1) / (q3 + q1)), 3) if (q3 + q1) != 0 else float("nan")
+    return cv, qcd
+
+
+def _safe_ratio(num: int, denom: int) -> float:
+    return float(num / denom) if denom > 0 else float("nan")
+
+
+# ---------------------------------------------------------------------------
+# shape measurement
+# ---------------------------------------------------------------------------
+
+def shape_discriber(
+    structure_mask: np.ndarray,
+    resolution: List,
+    cell_id: str,
+    measured_parameters: List,
+) -> pd.DataFrame:
+    """Measure shape descriptors for each connected object in ``structure_mask``.
+
+    For 3D masks ``resolution`` is ``[z, y, x]``; for 2D it is ``[y, x]``.
+    Expected columns typically match ``SHAPE_PARAMS_3D``.
+    """
+    structure_mask = np.pad(structure_mask, 5, "constant", constant_values=0)
+
     if np.count_nonzero(structure_mask) == 0:
-        
-        # create a pd_dataframe with the parameters as columns, and values as None
-        df = pd.DataFrame(columns=measured_parameters,index=[0])
-       
-       # store measurements in dataframe: fill with 0 except cell_id
+        df = _empty_row_df(measured_parameters)
         for key in measured_parameters:
-            if key == "cell_id":
-                df.loc[0,key] = cell_id
-            else:
-                df.loc[0,key] = 0
+            df.loc[0, key] = cell_id if key == "cell_id" else 0
+        return df
 
-    else:
-        labeled_mask, num_objs = label(structure_mask, return_num=True,connectivity=2)
-        df = pd.DataFrame(columns=measured_parameters, index=range(1,num_objs+1))
-        
-        if len(structure_mask.shape) == 3 and len(resolution) == 3:
-            ##############################################################################
-            # move object into a larger frame to calculate aspect_ratio and bbox,    #####
-            # because major and minor axis will still be returned but not accurately,#####
-            # if the bbox extend the image boundary                                  #####
-            ##############################################################################
-            labeled_mask = np.pad(labeled_mask,(int(labeled_mask.shape[0]/2),),'constant')
+    labeled_mask, num_objs = label(structure_mask, return_num=True, connectivity=2)
+    df = pd.DataFrame(columns=measured_parameters, index=range(1, num_objs + 1))
 
-            # meaure all objects in one image
-            for i in range(1,num_objs+1):
-                obj_seg = np.where(labeled_mask==i,labeled_mask,0)
-                
-                # measure size: volume, surface
-                verts_surf,faces_surf, normals_surf,values_surf = marching_cubes(
-                    obj_seg,spacing=tuple(resolution),allow_degenerate=True)
-                surface_area = mesh_surface_area(verts_surf,faces_surf)
-                voxel_vol = resolution[0]*resolution[1]*resolution[2]
-                vol = np.count_nonzero(obj_seg)*voxel_vol
-                
-                # surface-to-volume ratio
-                sv_ratio = surface_area/vol
-                
-                # sphericity: calculate spheracity based on the definition by Wadell 1935
-                equiv_sphere_surf = ((np.pi)**(1/3))*((6*vol)**(2/3))
-                sphericity = equiv_sphere_surf/surface_area
+    is_3d = len(structure_mask.shape) == 3 and len(resolution) == 3
+    is_2d = len(structure_mask.shape) == 2 and len(resolution) == 2
 
-                aspect_ratio = regionprops(obj_seg)[0]["axis_minor_length"]/regionprops(obj_seg)[0]["axis_major_length"]
-                solidity = regionprops(obj_seg)[0]["solidity"]
-                # store measurements in dataframe for each object
-                df.loc[i,df.columns] = pd.Series(
-                    [cell_id, i, surface_area, vol, sv_ratio, sphericity, aspect_ratio, solidity], index=df.columns
-                    )
-                
-        if len(structure_mask.shape) == 2 and len(resolution) == 2:
-            labeled_mask = np.pad(labeled_mask,(int(labeled_mask.shape[0]/2),int(labeled_mask.shape[1]/2)),'constant')
-            for i in range(1,num_objs+1):
-                obj_seg = np.where(labeled_mask==i,labeled_mask,0)
-                logger.debug("2D object %d voxel count: %d", i, np.count_nonzero(obj_seg))
-                # measure size: area, perimeter
-                area = np.count_nonzero(obj_seg)*resolution[0]*resolution[1]
-                perimeter = regionprops(obj_seg)[0]["perimeter"]*resolution[0]
-                
-                # surface-to-volume ratio
-                pa_ratio = perimeter/area
-                # circularity
-                sphericity = 4*np.pi*area/(perimeter**2)
-                
-                aspect_ratio = regionprops(obj_seg)[0]["axis_minor_length"]/regionprops(obj_seg)[0]["axis_major_length"]
-                
-                # solidity: ratio of object area to convex hull area
-                solidity = regionprops(obj_seg)[0]["solidity"]
-                
-                # store measurements in dataframe
-                df.loc[i,df.columns] = pd.Series(
-                    [cell_id, i, perimeter, area, pa_ratio, sphericity, aspect_ratio, solidity], index=df.columns
-                    )
+    if is_3d:
+        pad = int(labeled_mask.shape[0] / 2)
+        labeled_mask = np.pad(labeled_mask, pad, "constant")
+        voxel_vol = float(np.prod(resolution))
+
+        for i in range(1, num_objs + 1):
+            obj_seg = labeled_mask == i
+            verts, faces, _, _ = marching_cubes(
+                obj_seg.astype(float), spacing=tuple(resolution), allow_degenerate=True
+            )
+            surface_area = mesh_surface_area(verts, faces)
+            vol = float(np.count_nonzero(obj_seg) * voxel_vol)
+            props = regionprops(obj_seg.astype(np.uint8))[0]
+            equiv_sphere_surf = (np.pi ** (1 / 3)) * ((6 * vol) ** (2 / 3))
+            _assign_row(df, i, {
+                "cell_id": cell_id,
+                "obj_id": i,
+                "surface_area": surface_area,
+                "volume": vol,
+                "surface_to_volume_ratio": surface_area / vol,
+                "sphericity": equiv_sphere_surf / surface_area,
+                "aspect_ratio": props.axis_minor_length / props.axis_major_length,
+                "solidity": props.solidity,
+            })
+
+    elif is_2d:
+        labeled_mask = np.pad(
+            labeled_mask,
+            (int(labeled_mask.shape[0] / 2), int(labeled_mask.shape[1] / 2)),
+            "constant",
+        )
+        pixel_area = resolution[0] * resolution[1]
+
+        for i in range(1, num_objs + 1):
+            obj_seg = labeled_mask == i
+            logger.debug("2D object %d voxel count: %d", i, np.count_nonzero(obj_seg))
+            props = regionprops(obj_seg.astype(np.uint8))[0]
+            area = float(np.count_nonzero(obj_seg) * pixel_area)
+            perimeter = props.perimeter * resolution[0]
+            _assign_row(df, i, {
+                "cell_id": cell_id,
+                "obj_id": i,
+                "surface_area": perimeter,
+                "volume": area,
+                "surface_to_volume_ratio": perimeter / area,
+                "sphericity": 4 * np.pi * area / (perimeter ** 2),
+                "aspect_ratio": props.axis_minor_length / props.axis_major_length,
+                "solidity": props.solidity,
+            })
+
     return df
 
-def batch_measure_shape(master_folder:str, mask_name:str, shape_parameters: List, resolution_3d: List = None, config=None):
-    """
-        ----------
-        Parameters:
-        -----------
-        master_folder: str
-            direcotory to the folder containing all experiment set
-        mask_name: str
-            the name of the mask file
-        shape_parameters: list
-            the parameters of the measurements as strings
-            should be:["cell_id", "obj_id", "surface_area", "volume" , "surface_to_volume_ratio", "sphericity", "aspect_ratio","solidity"]
-            updated as needed. make sure also update the shape_discriber function
-        resolution_3d: list, optional
-            voxel dimensions [z_um, y_um, x_um]; overrides config if provided
-        config: dict, optional
-            configuration dict (from config_loader.load_config); loaded automatically if None
-        Returns:
-        --------
-        all_dfs: list of dataframes measured by each cell
-    """
+
+def batch_measure_shape(
+    master_folder: str,
+    mask_name: str,
+    shape_parameters: List,
+    resolution_3d: List = None,
+    config=None,
+) -> List[pd.DataFrame]:
+    """Walk ``master_folder`` and measure shape for every cell's ``mask_name``."""
     if config is None:
         from config_loader import load_config
         config = load_config()
     if resolution_3d is None:
         resolution_3d = config["measurement"]["resolution_3d"]
 
-    # create a list to store measurements of all cells
     all_dfs = []
-
-    # import sub-folders from the main folder
     for item in os.listdir(master_folder):
-        # read experiment set folder
-        if os.path.isdir(os.path.join(master_folder,item)):
-            experiment_set_dir = os.path.join(master_folder,item)
-            # extract experiment set name
-            date = os.path.basename(experiment_set_dir)
-            
-            # read individual cell folder
-            for cell in os.listdir(experiment_set_dir):
-                cell_seg_dir = os.path.join(experiment_set_dir,cell)
-                cell_id = date + os.sep + os.path.basename(cell_seg_dir)
-                logger.info("Processing: %s", cell_seg_dir)
-
-                # read the images
-                mask = import_imgs(cell_seg_dir, mask_name)
-
-                # measure GC mask for each cell and return data frame
-                each_cell_df = shape_discriber(
-                mask, resolution=resolution_3d, cell_id=cell_id,
-                measured_parameters=shape_parameters)
-                all_dfs.append(each_cell_df)
-    
+        experiment_set_dir = os.path.join(master_folder, item)
+        if not os.path.isdir(experiment_set_dir):
+            continue
+        date = os.path.basename(experiment_set_dir)
+        for cell in os.listdir(experiment_set_dir):
+            cell_seg_dir = os.path.join(experiment_set_dir, cell)
+            cell_id = date + os.sep + os.path.basename(cell_seg_dir)
+            logger.info("Processing: %s", cell_seg_dir)
+            mask = import_imgs(cell_seg_dir, mask_name)
+            all_dfs.append(
+                shape_discriber(
+                    mask, resolution=resolution_3d, cell_id=cell_id,
+                    measured_parameters=shape_parameters,
+                )
+            )
     return all_dfs
 
-def group_gc_measure_df(measurement_dfs:List,number_parameters:List, size_parameters:List):
-    """
-    this is to group measurements in different ways: by each object, by each cell, 
-    and save different features
-    check if you have prarameters as follows:["cell_id", "obj_id", "surface_area", "volume" , "surface_to_volume_ratio", "void_ratio", "sphericity", "aspect_ratio","solidity"]
-    -----------
-    Parameters:
-    -----------
-    measurement_dfs: List
-        a list of measurement dfs, should have the same columns
-    number_parameters: List
-        list as ["cell_id",measurement_to_plot,"stage"]
-    size_parameters: List
-        list as ["cell_id", "surface_area", "volume", "surface_to_volume_ratio","stage":str]
-    grouped_by: str
-        specify either "cell_id" or "obj_id"
-    Returns:
-    --------
-    df: pandas dataframe
-        
-    """
-    df = pd.concat(measurement_dfs,axis=0,ignore_index=True)
 
-    #########################
-    # group data by cell_id #
-    #########################
+def group_gc_measure_df(
+    measurement_dfs: List,
+    number_parameters: List,
+    size_parameters: List,
+):
+    """Group per-object measurements into cell- and object-level DataFrames."""
+    df = pd.concat(measurement_dfs, axis=0, ignore_index=True)
+    df = _add_stage_column(df)
 
-    # get unique cell_id
-    by_cell_df = df[["cell_id"]].drop_duplicates()
+    grouped = df.groupby("cell_id", sort=False)
+    number_by_cell_df = grouped.agg(obj_id=("obj_id", "max")).reset_index()
+    number_by_cell_df = number_by_cell_df.rename(columns={"obj_id": number_parameters[1]})
+    number_by_cell_df["stage"] = number_by_cell_df["cell_id"].map(extract_stage)
+    number_by_cell_df = number_by_cell_df[number_parameters]
+    number_by_cell_df = _sort_by_stage(number_by_cell_df)
 
-    # create number dataframe
-    nb_variables: Dict[str, Any] = {}
-    for key in number_parameters:
-        nb_variables[key] = None
-    number_by_cell_df = pd.DataFrame(columns = nb_variables,index = range(len(by_cell_df)))
+    size_agg = grouped.agg(surface_area=("surface_area", "sum"), volume=("volume", "sum")).reset_index()
+    size_agg["surface_to_volume_ratio"] = size_agg["surface_area"] / size_agg["volume"]
+    size_agg["stage"] = size_agg["cell_id"].map(extract_stage)
+    size_by_cell_df = size_agg[size_parameters]
+    size_by_cell_df = _sort_by_stage(size_by_cell_df)
 
-    # create size dataframe
-    size_variables: Dict[str, Any] = {}
-    for key in size_parameters:
-        size_variables[key] = None
-    size_by_cell_df = pd.DataFrame(columns = size_variables,index = range(len(by_cell_df)))
-
-    # sort values from raw dataframe in different feature dataframes
-    for index, row in by_cell_df.iterrows():
-        # extract larval stage from cell_id
-        stage = extract_stage(row["cell_id"])
-
-        # count number of objects
-        obj_count = float(df.loc[df["cell_id"]==row["cell_id"],["obj_id"]].max().iloc[0])
-
-        # store values in number dataframe
-        number_by_cell_df.loc[index,number_by_cell_df.columns] = pd.Series(
-            [row["cell_id"],obj_count,stage],index=number_by_cell_df.columns)
-
-
-        # store values in size dataframe
-        volume_sum = float(df.loc[df["cell_id"]==row["cell_id"],["volume"]].sum().iloc[0])
-        surface_sum = float(df.loc[df["cell_id"]==row["cell_id"],["surface_area"]].sum().iloc[0])
-        surf_vol_ratio = surface_sum/volume_sum
-
-        size_by_cell_df.loc[index,size_by_cell_df.columns] = pd.Series([row["cell_id"],surface_sum,volume_sum,surf_vol_ratio,stage],index=size_by_cell_df.columns)
-        
-
-    # sort dataframes
-    number_by_cell_df = number_by_cell_df.sort_values(by="stage",ascending=True)
-    number_by_cell_df = number_by_cell_df.reset_index(drop=True)
-    size_by_cell_df = size_by_cell_df.sort_values(by="stage",ascending=True)
-    size_by_cell_df = size_by_cell_df.reset_index(drop=True)
-    ###########################
-    # group data by object_id #
-    ###########################
-    # store values in size dataframe
-    size_by_obj_df = df[["cell_id", "obj_id", "surface_area", "volume", "surface_to_volume_ratio"]].copy()
-
-    for index, row in size_by_obj_df.iterrows():
-        size_by_obj_df.loc[index,"stage"] = extract_stage(row["cell_id"])
-
-    size_by_obj_df = size_by_obj_df.sort_values("stage",ascending=True)
-    size_by_obj_df = size_by_obj_df.reset_index(drop=True)
-
-    # store values in morphology dataframe
-    morphology_by_obj_df = df[["cell_id","obj_id","sphericity", "aspect_ratio","solidity"]].copy()
-
-    for index, row in morphology_by_obj_df.iterrows():
-        morphology_by_obj_df.loc[index,"stage"] = extract_stage(row["cell_id"])
-
-    morphology_by_obj_df = morphology_by_obj_df.sort_values("stage",ascending=True)
-    morphology_by_obj_df = morphology_by_obj_df.reset_index(drop=True)
-
-    # return all dataframes
+    size_by_obj_df = _sort_by_stage(
+        df[["cell_id", "obj_id", "surface_area", "volume", "surface_to_volume_ratio", "stage"]]
+    )
+    morphology_by_obj_df = _sort_by_stage(
+        df[["cell_id", "obj_id", "sphericity", "aspect_ratio", "solidity", "stage"]]
+    )
     return number_by_cell_df, size_by_cell_df, morphology_by_obj_df, size_by_obj_df
 
-def box_plot(df: pd.DataFrame, measurement_to_plot:str, y_axis_label: str, show_mean:bool=False, add_title: str = None):
-    """
-    -----------
-    Parameters:
-    df: pandas dataframe
-        the grouped larval dataframe to be plotted
-    measurement_to_plot: str
-        specify the measurement to be plotted based on the column name
-    object_type: str
-        specify the object type: "GC" or "hole"
-    
-    Returns:
-    plot: matplotlib figure
 
-    """
-    # extracting unique larval stages and excluding missing values
-    stages = df.stage.dropna().unique()
-    # Sorting the stages in the desired order: ascending, [L1,L2,L3,L4]
-    sorted_stages = pd.Series(stages).sort_values(ascending=True).tolist()
+def box_plot(
+    df: pd.DataFrame,
+    measurement_to_plot: str,
+    y_axis_label: str,
+    show_mean: bool = False,
+    add_title: str = None,
+):
+    """Box plot of ``measurement_to_plot`` across larval stages L1–L4."""
+    stages = ["L1", "L2", "L3", "L4"]
+    # Keep canonical L1–L4 order for tick labels even if some stages are empty
+    sorted_stages = [s for s in stages if s in set(df.stage.dropna().unique())]
+    if not sorted_stages:
+        sorted_stages = stages
+    vals = [df.loc[df["stage"] == s, measurement_to_plot] for s in sorted_stages]
 
-    # extracting number of objects in each larval stages
-    L1 = df.loc[df["stage"]=="L1",measurement_to_plot]
-    L2 = df.loc[df["stage"]=="L2",measurement_to_plot]
-    L3 = df.loc[df["stage"]=="L3",measurement_to_plot]
-    L4 = df.loc[df["stage"]=="L4",measurement_to_plot]
-    vals = [L1,L2,L3,L4]
-
-    # create a box plot
-    fig, ax =plt.subplots(ncols=1,nrows=1,figsize=(4,4))
-    ax.boxplot(vals,notch=None,whis=(5,95),showmeans=True, showfliers=False,
-                meanprops={"marker":"^","markersize":10,"markerfacecolor":"white", "markeredgecolor":"b"},
-                medianprops={"linestyle":'-', "color":'red', "linewidth":2})
-    
-    # Add legend
+    fig, ax = plt.subplots(ncols=1, nrows=1, figsize=(4, 4))
+    ax.boxplot(
+        vals, notch=None, whis=(5, 95), showmeans=True, showfliers=False,
+        meanprops={"marker": "^", "markersize": 10, "markerfacecolor": "white", "markeredgecolor": "b"},
+        medianprops={"linestyle": "-", "color": "red", "linewidth": 2},
+    )
     if show_mean:
-        mean_marker = plt.Line2D([0], [0], marker='^', color='b', markersize=10, label='Mean')
-        median_line = plt.Line2D([0], [0], linestyle='-', color='red', linewidth=2, label='Median')
-        ax.legend(handles=[mean_marker, median_line], loc='best')
+        mean_marker = plt.Line2D([0], [0], marker="^", color="b", markersize=10, label="Mean")
+        median_line = plt.Line2D([0], [0], linestyle="-", color="red", linewidth=2, label="Median")
+        ax.legend(handles=[mean_marker, median_line], loc="best")
 
-    # add labels to the x-axis
     ax.set_xticks(range(1, len(vals) + 1), sorted_stages)
-
-    # add individual data points to the box plot
     for i, lst in enumerate(vals):
-        # make data points spreaded by normal distribution
         xs = np.random.normal(i + 1, 0.04, lst.shape[0])
-        ax.scatter(xs, lst, color="k",alpha=0.5)
+        ax.scatter(xs, lst, color="k", alpha=0.5)
 
-    # Set labels and title
-    ax.set_xlabel("Larval stages post synchronization",fontsize=12)
-    ax.set_ylabel(y_axis_label,fontsize=12)
-    if add_title != None:
-        ax.set_title(add_title,fontsize=12)
-    # ax.set_title('{} meaurement of channel'.format(object_type),fontsize=12)
+    ax.set_xlabel("Larval stages post synchronization", fontsize=12)
+    ax.set_ylabel(y_axis_label, fontsize=12)
+    if add_title is not None:
+        ax.set_title(add_title, fontsize=12)
     return fig
 
-################################################
-#        intensity based analysis              #
-################################################
-# intensity based analysis
-def dilated_mask(mask:np.array, radius: int, dilated_3d: bool = False, dilate_slice_by_slice: bool = False):
-    """
-    Parameters:
-    -----------
-    mask: 3D array
-        the gc mask has been filled holes
-    radius: int
-        the dilation radius
-    dilated_3d: bool
-        whether to dilate mask in 3d
-    dilate_slice_by_slice: bool
-        whether to dilate mask slice-by-slice
 
-    Returns:
-    --------
-    dilated_mask: 3D array
-    """
-    # dilate mask in 3d
+# ---------------------------------------------------------------------------
+# intensity-based analysis
+# ---------------------------------------------------------------------------
+
+def dilated_mask(
+    mask: np.ndarray,
+    radius: int,
+    dilated_3d: bool = False,
+    dilate_slice_by_slice: bool = False,
+) -> np.ndarray:
+    """Dilate ``mask`` in 3D or slice-by-slice; zeros top/bottom Z slices."""
     if dilated_3d:
-        dilated_mask = binary_dilation(mask, footprint=ball(radius))
-
-    # dilate mask slice-by-slice
-    if dilate_slice_by_slice:
-        dilated_mask = np.zeros_like(mask)
+        out = binary_dilation(mask, footprint=ball(radius))
+    elif dilate_slice_by_slice:
+        out = np.zeros_like(mask)
         for z in range(mask.shape[0]):
-            if np.count_nonzero(mask[z, :, :]) > 0:
-                dilated_mask[z, :, :] = binary_dilation(mask[z, :, :], footprint=disk(radius))
-    
-    # set top and bottom of dilated mask to 0
-    dilated_mask[0, :, :] = 0
-    dilated_mask[-1, :, :] = 0
-    
-    return dilated_mask
+            if np.count_nonzero(mask[z]) > 0:
+                out[z] = binary_dilation(mask[z], footprint=disk(radius))
+    else:
+        raise ValueError("Set dilated_3d=True or dilate_slice_by_slice=True")
 
-def coefficient_of_variances(gc_mask: np.ndarray, img: np.ndarray, cell_id: str, measured_parameters: List):
-    """
-    Parameters:
-    -----------
-    gc_mask: 3D array
-        the gc mask has been filled holes
-    img: nD array
-        3 channel stacked image
-    radius: int
-        the dilation radius
-    cell_id: str
-        the id of the cell: in the form of: 'experiment_set'_'cell folder'
-    measured_parameters: List
-        list of parameters: ["cell_id", "cv_r", "cv_g", "cv_b", "qcd_r", "qcd_g", "qcd_b"]
-    
-    Returns:
-    --------
-    cv: list
-        list of cv of each channel as the order: r,g,b
-    qcd: list
-        list of qcd of each channel as the order: r,g,b
-    """
-    ################################
-    # process mask                 #
-    ################################
-    
-
-    # extract gray value of each channel from dilated mask
-    raw_red_in_mask = img[...,0][gc_mask>0]
-    raw_green_in_mask = img[...,1][gc_mask>0]
-    raw_blue_i_mask = img[...,2][gc_mask>0]
-
-    ################################
-    # process mask   done          #
-    ################################
-    # create a pd_dataframe to store measurements
-    variables: Dict[str, Any] = {}
-    for key in measured_parameters:
-        variables[key] = None
-    df = pd.DataFrame(variables, index=[0]) 
-
-    # measure coefficient of variance
-    cv_r = round(np.std(raw_red_in_mask)/np.mean(raw_red_in_mask),3)
-    cv_g = round(np.std(raw_green_in_mask)/np.mean(raw_green_in_mask),3)
-    cv_b = round(np.std(raw_blue_i_mask)/np.mean(raw_blue_i_mask),3)
-
-    # measure quartile coefficient of dispersion, Q3-Q1/Q3+Q1, descriptive measurement of dispersion,less sensitive to outliers
-    qcd_r = round((np.quantile(raw_red_in_mask,0.75)-np.quantile(raw_red_in_mask,0.25))/(np.quantile(raw_red_in_mask,0.75)+np.quantile(raw_red_in_mask,0.25)),3)
-    qcd_g = round((np.quantile(raw_green_in_mask,0.75)-np.quantile(raw_green_in_mask,0.25))/(np.quantile(raw_green_in_mask,0.75)+np.quantile(raw_green_in_mask,0.25)),3)
-    qcd_b = round((np.quantile(raw_blue_i_mask,0.75)-np.quantile(raw_blue_i_mask,0.25))/(np.quantile(raw_blue_i_mask,0.75)+np.quantile(raw_blue_i_mask,0.25)),3)
-
-    # store values in the pd_dataframe
-    df.loc[0,df.columns] = pd.Series([cell_id,cv_r,cv_g,cv_b,qcd_r,qcd_g,qcd_b],index=df.columns)
+    out[0] = 0
+    out[-1] = 0
+    return out
 
 
+def coefficient_of_variances(
+    gc_mask: np.ndarray,
+    img: np.ndarray,
+    cell_id: str,
+    measured_parameters: List,
+) -> pd.DataFrame:
+    """Compute CV and QCD of each channel inside ``gc_mask``."""
+    channels = [img[..., c][gc_mask > 0] for c in range(3)]
+    metrics = [_cv_qcd(ch) for ch in channels]
+    values = {
+        "cell_id": cell_id,
+        "cv_r": metrics[0][0], "cv_g": metrics[1][0], "cv_b": metrics[2][0],
+        "qcd_r": metrics[0][1], "qcd_g": metrics[1][1], "qcd_b": metrics[2][1],
+    }
+    df = _empty_row_df(measured_parameters)
+    _assign_row(df, 0, {k: values[k] for k in measured_parameters if k in values})
     return df
 
-################################################
-# function realted to get colocalization       #
-################################################
-def relative_intensity(raw_img:np.array, dilated_mask: np.array, upper_limit: float):
-    """
-    ----------
-    Parameters:
-    -----------
-    raw_img: nD array
-        3 channel stacked image
-    dilated_mask: 3D array
-        the gc mask has been filled holes and dilated
-    upper_limit: float
-        the upper limit of intensity
-    Returns:
-    --------
-    img_top: nD array
-        binary image with intenisty value above upper_limit
-    """
 
-    # get the intensity of each channel in the dilated_mask
-    raw_in_mask = np.stack([np.where(dilated_mask>0,raw_img[...,i],0) for i in range(raw_img.shape[-1])],axis=3)
+def relative_intensity(raw_img: np.ndarray, dilated_mask: np.ndarray, upper_limit: float) -> np.ndarray:
+    """Keep pixels at or above ``upper_limit * channel_max`` inside the mask."""
+    raw_in_mask = _masked_channels(raw_img, dilated_mask)
+    top = np.zeros_like(raw_in_mask)
+    for i in range(raw_in_mask.shape[-1]):
+        channel = raw_in_mask[..., i]
+        top[..., i] = np.where(channel >= upper_limit * channel.max(), channel, 0)
+    return _to_uint8_binary(top)
 
-    # get the top intensity of each channel
-    top_ = np.zeros_like(raw_in_mask)
+
+def relative_number_of_pixels(
+    raw_img: np.ndarray, dilated_mask: np.ndarray, upper_limit: float
+) -> np.ndarray:
+    """Keep the top ``upper_limit`` fraction of positive masked pixels per channel."""
+    raw_in_mask = _masked_channels(raw_img, dilated_mask)
+    top = np.zeros_like(raw_in_mask)
 
     for i in range(raw_in_mask.shape[-1]):
-        each_channel = raw_in_mask[...,i]
-        top_[...,i] = np.where(each_channel>=upper_limit*each_channel.max(),each_channel,0)
-    top_ = top_.astype(np.uint8)
-    top_[top_ > 0] = 255
-    return top_
+        channel = raw_in_mask[..., i]
+        positive = channel > 0
+        n_pos = int(np.count_nonzero(positive))
+        if n_pos == 0:
+            continue
+        n_keep = max(1, int(n_pos * upper_limit))
+        # Indices of the n_keep brightest positive pixels
+        flat = channel.ravel()
+        # Only consider positive pixels: set non-positive to -inf for ranking
+        ranked = flat.copy()
+        ranked[~positive.ravel()] = -np.inf
+        top_idx = np.argpartition(ranked, -n_keep)[-n_keep:]
+        coords = np.unravel_index(top_idx, channel.shape)
+        top[coords + (i,)] = channel[coords]
 
-def relative_number_of_pixels(raw_img:np.array, dilated_mask: np.array, upper_limit: float):
-    """
-    ----------
-    Parameters:
-    -----------
-    raw_img: nD array
-        3 channel stacked image
-    dilated_mask: 3D array
-        the gc mask has been filled holes and dilated
-    upper_limit: float
-        the upper limit of intensity
-    Returns:
-    --------
-    img_top: nD array
-        binary image with intenisty value above upper_limit
-    """
+    return _to_uint8_binary(top)
 
-    # get the intensity of each channel in the dilated_mask
-    raw_in_mask = np.stack([np.where(dilated_mask>0,raw_img[...,i],0) for i in range(raw_img.shape[-1])],axis=3)
 
-    # get the top intensity of each channel
-    top_ = np.zeros_like(raw_in_mask)
+def overlap_3channel(top_img: np.ndarray, cell_id: str) -> pd.DataFrame:
+    """Compute pairwise and triple-channel overlap ratios from a 3-channel binary image."""
+    img_r, img_g, img_b = top_img[..., 0], top_img[..., 1], top_img[..., 2]
+    overlap_rg = np.logical_and(img_r, img_g)
+    overlap_rb = np.logical_and(img_r, img_b)
+    overlap_gb = np.logical_and(img_g, img_b)
+    overlap_rgb = np.logical_and.reduce([overlap_rg, overlap_rb, overlap_gb])
 
-    for i in range(raw_in_mask.shape[-1]):
-        each_channel = raw_in_mask[...,i]
+    n_r, n_g, n_b = map(np.count_nonzero, (img_r, img_g, img_b))
+    n_rg, n_rb, n_gb, n_rgb = map(np.count_nonzero, (overlap_rg, overlap_rb, overlap_gb, overlap_rgb))
 
-        # Flatten the image to a 1-dimensional array
-        flattened_each = each_channel.flatten()
-
-        # Sort in a descending order and returns the indices that correspond to the sorted array
-        sorted_values_indices = np.argsort(flattened_each)[::-1]
-        sorted_values = flattened_each[sorted_values_indices]
-        values_greater_zero = sorted_values[sorted_values>0]
-       
-
-        # Calculate the threshold for the top 10% values
-        threshold_index = int(len(values_greater_zero) * upper_limit)
-        threshold_value = sorted_values[threshold_index]
-
-        # Extract the top 10% values and their coordinates
-        # top_percent_values.append(sorted_values[:threshold_index])
-        
-        coordinates = np.unravel_index(sorted_values_indices[:threshold_index], each_channel.shape)
-        
-        # store pixels of top 10% values
-        zip_coordinates = list(zip(*coordinates))
-        for coordinate in zip_coordinates:
-            top_[coordinate[0],coordinate[1],coordinate[2],i] = each_channel[coordinate[0],coordinate[1],coordinate[2]]
-        
-    top_ = top_.astype(np.uint8)
-    top_[top_ > 0] = 255
-    return top_
-
-def overlap_3channel (top_img: np.array, cell_id: str):
-    """
-    ----------
-    Parameters:
-    -----------
-    top_img: nD array
-        3 channel binary image after screened for top 10% intensity
-    Returns:
-    --------
-    colocal_df: pd.DataFrame
-        dataframe of colocalization between each channel
-    """
-    # read image
-    img_r = top_img[...,0]
-    img_g = top_img[...,1]
-    img_b = top_img[...,2]
-
-    # overlap binary image
-    overlap_rg = np.logical_and(img_r,img_g)
-    overlap_rb = np.logical_and(img_r,img_b)
-    overlap_gb = np.logical_and(img_g,img_b)
-    overlap = np.logical_and(overlap_rg,overlap_rb)
-
-    # caluclate overlap ratio of each channel>0
-    rg_over_r = np.count_nonzero(overlap_rg)/np.count_nonzero(img_r)
-    rg_over_g = np.count_nonzero(overlap_rg)/np.count_nonzero(img_g)
-
-    rb_over_r = np.count_nonzero(overlap_rb)/np.count_nonzero(img_r)
-    rb_over_b = np.count_nonzero(overlap_rb)/np.count_nonzero(img_b)
-
-    gb_over_g = np.count_nonzero(overlap_gb)/np.count_nonzero(img_g)
-    gb_over_b = np.count_nonzero(overlap_gb)/np.count_nonzero(img_b)
-
-    rgb_over_r = np.count_nonzero(overlap)/np.count_nonzero(img_r)
-    rgb_over_g = np.count_nonzero(overlap)/np.count_nonzero(img_g)
-    rgb_over_b = np.count_nonzero(overlap)/np.count_nonzero(img_b)
-
-    # store values in the pd_dataframe
-    colocal_df = pd.DataFrame(columns=['cell_id', 'rg_over_r','rg_over_g','rb_over_r','rb_over_b','gb_over_g','gb_over_b','rgb_over_r','rgb_over_g','rgb_over_b'],index=[0])
-
-    colocal_df.loc[0,colocal_df.columns] = pd.Series([cell_id,rg_over_r,rg_over_g,rb_over_r,rb_over_b,gb_over_g,gb_over_b,rgb_over_r,rgb_over_g,rgb_over_b],index=colocal_df.columns)
-
-    colocal_df["stage"] = extract_stage(cell_id)
-
+    colocal_df = pd.DataFrame([{
+        "cell_id": cell_id,
+        "rg_over_r": _safe_ratio(n_rg, n_r),
+        "rg_over_g": _safe_ratio(n_rg, n_g),
+        "rb_over_r": _safe_ratio(n_rb, n_r),
+        "rb_over_b": _safe_ratio(n_rb, n_b),
+        "gb_over_g": _safe_ratio(n_gb, n_g),
+        "gb_over_b": _safe_ratio(n_gb, n_b),
+        "rgb_over_r": _safe_ratio(n_rgb, n_r),
+        "rgb_over_g": _safe_ratio(n_rgb, n_g),
+        "rgb_over_b": _safe_ratio(n_rgb, n_b),
+        "stage": extract_stage(cell_id),
+    }])
     return colocal_df
 
+
 def overlap_heatmap(mean_df: pd.DataFrame, stage: str):
-    """
-    """
-    # create a heatmap of overlap ratio
-    channels = ["Red","Green","Blue"]
-    # store overlap in a 3x3 matrix
-    overlap = np.zeros((3,3),dtype=float)
+    """Plot a 3x3 channel-overlap heatmap for one larval stage."""
+    channels = ["Red", "Green", "Blue"]
+    overlap = np.array([
+        [1.0, mean_df.loc[0, "rg_over_r"], mean_df.loc[0, "rb_over_r"]],
+        [mean_df.loc[0, "rg_over_g"], 1.0, mean_df.loc[0, "gb_over_g"]],
+        [mean_df.loc[0, "rb_over_b"], mean_df.loc[0, "gb_over_b"], 1.0],
+    ], dtype=float)
 
-    # Red channel overlaps with channels
-    overlap[0,0] = "{:.3f}".format(1)
-    overlap[0,1] = "{:.3f}".format(mean_df.loc[0,"rg_over_r"])
-    overlap[0,2] = "{:.3f}".format(mean_df.loc[0,"rb_over_r"])
-
-    # Green channel overlaps with channels
-    overlap[1,0] = "{:.3f}".format(mean_df.loc[0,"rg_over_g"])
-    overlap[1,1] = "{:.3f}".format(1)
-    overlap[1,2] = "{:.3f}".format(mean_df.loc[0,"gb_over_g"])
-
-    # Blue channel overlaps with channels
-    overlap[2,0] = "{:.3f}".format(mean_df.loc[0,"rb_over_b"])
-    overlap[2,1] = "{:.3f}".format(mean_df.loc[0,"gb_over_b"])
-    overlap[2,2] = "{:.3f}".format(1)
-
-    # plot heatmap with ratios
-    fig,axs = plt.subplots(1,1,figsize=(4,4))
-    im = axs.imshow(overlap,cmap="viridis")
-    # show ticks and labels with the repective list channels
-    axs.set_xticks(np.arange(len(channels)),labels=channels,fontsize=15)
-    axs.set_yticks(np.arange(len(channels)),labels=channels,fontsize=15)
-
-    # Loop over data dimensions and create text annotations.
+    fig, axs = plt.subplots(1, 1, figsize=(4, 4))
+    axs.imshow(overlap, cmap="viridis")
+    axs.set_xticks(np.arange(len(channels)), labels=channels, fontsize=15)
+    axs.set_yticks(np.arange(len(channels)), labels=channels, fontsize=15)
     for i in range(len(channels)):
         for j in range(len(channels)):
-            text = axs.text(j, i, overlap[i, j],
-                        ha="center", va="center", color="red", fontsize=20)
-    axs.set_title(f"Ratio of overlapped pixels at {stage} (top 10%)",fontsize=15)
+            axs.text(j, i, f"{overlap[i, j]:.3f}", ha="center", va="center", color="red", fontsize=20)
+    axs.set_title(f"Ratio of overlapped pixels at {stage} (top 10%)", fontsize=15)
     return fig
 
-################################################
-# function realted to measure concentration    #
-################################################
-def get_largetest_slice(seg_hole_filled_mask: np.array):
-    """
-    ----------
-    Parameters:
-    -----------
-    seg_hole_filled_mask: 3D array
-        seg_mask filled holes
-    Returns:
-    --------
-    z_slice: largest slice of seg_hole_filled_mask
-    """
-    # get the largest gc_mask_hole_filled slice
-    gc_size = [np.count_nonzero(seg_hole_filled_mask[z,:,:]) for z in range(seg_hole_filled_mask.shape[0])]
-    z_slice = gc_size.index(max(gc_size))
-    return z_slice
 
-def find_box_in_binary_region(fluorescent_image:np.array, nucleus_mask: np.array, seg_hole_filled_mask: np.array, box_size:int):
-    """
-    ----------
-    Parameters:
-    -----------
-    fluorescent_image: nD array
-        raw image
-    binary_mask: 2D array
-        nucleus mask
-    box_size: int
-        the size of rectangle, use even number
-    Returns:
-    --------
-    box_mask: 3D array
-    """
-    # Get the region between two masks
-    binary_mask = nucleus_mask - seg_hole_filled_mask
-    binary_mask[binary_mask>0] = 1
-    # Find the coordinates of positive regions in the binary image
+# ---------------------------------------------------------------------------
+# concentration measurement
+# ---------------------------------------------------------------------------
+
+def get_largetest_slice(seg_hole_filled_mask: np.ndarray) -> int:
+    """Return the Z index of the largest slice in a 3D binary mask."""
+    return int(np.count_nonzero(seg_hole_filled_mask, axis=(1, 2)).argmax())
+
+
+def find_box_in_binary_region(
+    fluorescent_image: np.ndarray,
+    nucleus_mask: np.ndarray,
+    seg_hole_filled_mask: np.ndarray,
+    box_size: int,
+) -> np.ndarray:
+    """Find the lowest-mean fully-contained box in the nucleoplasm region."""
+    binary_mask = (nucleus_mask - seg_hole_filled_mask) > 0
+    binary_mask = binary_mask.astype(np.uint8)
     positive_regions = np.where(binary_mask > 0)
 
-    # Initialize variables to store the minimum mean intensity and the corresponding box
-    min_mean_intensity = float('inf')
+    min_mean_intensity = float("inf")
     top_left_coord = None
     box_radius = box_size // 2
+    h, w = binary_mask.shape
 
-    # Iterate over the positive regions
-    for i in range(len(positive_regions[0])):
-        y = positive_regions[0][i]
-        x = positive_regions[1][i]
+    for y, x in zip(positive_regions[0], positive_regions[1]):
+        if not (box_radius <= y < h - box_radius and box_radius <= x < w - box_radius):
+            continue
+        y0, y1 = y - box_radius, y + box_radius + 1
+        x0, x1 = x - box_radius, x + box_radius + 1
+        if np.any(binary_mask[y0:y1, x0:x1] == 0):
+            continue
+        mean_intensity = float(np.mean(fluorescent_image[y0:y1, x0:x1]))
+        if mean_intensity < min_mean_intensity:
+            min_mean_intensity = mean_intensity
+            top_left_coord = (y, x)
 
-        # Check if the 7x7 box can be extracted around the given coordinates
-        if y >= box_radius and y < binary_mask.shape[0] - box_radius and \
-           x >= box_radius and x < binary_mask.shape[1] - box_radius:
-           
-            # Extract the 7x7 box from the binary image
-            binary_box = binary_mask[y - box_radius:y + box_radius + 1, x - box_radius:x + box_radius + 1]
-            
-            # Check in the binary image if the 7x7 box has any zeros(background pixels)
-            if not np.any(binary_box == 0):
-                # print(f"in the 7x7 box by {(y,x)} there is not zeros background pixels")
-                # Extract the corresponding 7x7 box from the fluorescent image
-                fluorescent_box = fluorescent_image[y - box_radius:y + box_radius + 1, x - box_radius:x + box_radius + 1]
-                
-                # Calculate the mean intensity of the 7x7 box
-                mean_intensity = np.mean(fluorescent_box)
-
-                # Update the minimum mean intensity and the corresponding box
-                if mean_intensity < min_mean_intensity:
-                    min_mean_intensity = mean_intensity
-                    top_left_coord = (y, x)
-    
     if top_left_coord is None:
         raise ValueError(f"No valid box of size {box_size} found within the binary region.")
 
-    # Create the box mask the the corresponding coordinates
     box_mask = np.zeros_like(binary_mask)
-    box_mask[top_left_coord[0]-box_radius:top_left_coord[0]+box_radius, top_left_coord[1]-box_radius:top_left_coord[1]+box_radius] = 1
+    cy, cx = top_left_coord
+    # Preserve original half-open extent (matches prior behaviour)
+    box_mask[cy - box_radius:cy + box_radius, cx - box_radius:cx + box_radius] = 1
     return box_mask
 
-def concentration_gc(raw_img:np.array, raw_bg_subt:np.array, background_mask:np.array, nucleoplasm_mask:np.array, seg_mask:np.array, seg_hole_filled_mask: np.array, nucleus_mask:np.array,cell_id:str, measured_parameters:List):
-    """
-    ----------
-    Parameters:
-    -----------
-    raw_img: 2D array
-        raw image
-    raw_bg_subt: 2D array
-        raw image background subtracted
-    background_mask: 2D array
-        background_mask mask
-    nucleoplasm_mask: 2D array
-        nucleoplasm mask
-    seg_mask: 2D array
-        segmented mask
-    seg_hole_filled_mask: 2D array
-        seg_mask filled holes
-    nucleus_mask: 2D array
-        nucleus mask
-    cell_id: str
-        the id of the cell: in the form of: 'experiment_set'_'cell folder'
-    measured_parameters: list 
-        the parameters of the measurements as strings
-        should be:["cell_id", "C_bg", "C_dilute", "C_dense", "pc", "nuclear area"]
-    Returns:
-    --------
-    df: pandas dataframe
-        measurements stored as dataframe for each cell
-    """
-    # copy raw image for background subtraction
-    raw_gc = raw_img.copy()
-    img = raw_bg_subt.copy()
-    
-    # create dataframe
-    variables: Dict[str, Any] = {}
-    for key in measured_parameters:
-        variables[key] = None
-    df = pd.DataFrame(variables, index=[0])
 
-    # measure intensity in ROI after background subtraction
-    bg_value = round(float(np.mean(img[background_mask>0])) if np.any(background_mask>0) else float('nan'), 1)
-    nucleoplasm_pixels_bg = img[nucleoplasm_mask>0]
-    dilute_value = round(float(np.mean(nucleoplasm_pixels_bg)) if nucleoplasm_pixels_bg.size > 0 else float('nan'), 1)
-    gc_value = round(float(np.mean(img[seg_mask>0])) if np.any(seg_mask>0) else float('nan'), 1)
-    total_value = round(float(np.mean(img[nucleus_mask>0])) if np.any(nucleus_mask>0) else float('nan'), 1)
+def concentration_gc(
+    raw_img: np.ndarray,
+    raw_bg_subt: np.ndarray,
+    background_mask: np.ndarray,
+    nucleoplasm_mask: np.ndarray,
+    seg_mask: np.ndarray,
+    seg_hole_filled_mask: np.ndarray,
+    nucleus_mask: np.ndarray,
+    cell_id: str,
+    measured_parameters: List,
+) -> pd.DataFrame:
+    """Measure background, dilute, dense, total intensity and partition coefficient."""
+    del seg_hole_filled_mask  # retained for API compatibility with callers/notebooks
 
-    # partition coefficient based on raw image
-    gc_value_raw = float(np.mean(raw_gc[seg_mask>0])) if np.any(seg_mask>0) else float('nan')
-    nucleoplasm_pixels_raw = raw_gc[nucleoplasm_mask>0]
-    if nucleoplasm_pixels_raw.size == 0 or float(np.mean(nucleoplasm_pixels_raw)) == 0:
-        pc_value = float('nan')
+    def _mean_in(img: np.ndarray, mask: np.ndarray) -> float:
+        pixels = img[mask > 0]
+        return float(np.mean(pixels)) if pixels.size > 0 else float("nan")
+
+    bg_value = round(_mean_in(raw_bg_subt, background_mask), 1)
+    dilute_value = round(_mean_in(raw_bg_subt, nucleoplasm_mask), 1)
+    gc_value = round(_mean_in(raw_bg_subt, seg_mask), 1)
+    total_value = round(_mean_in(raw_bg_subt, nucleus_mask), 1)
+
+    gc_raw = _mean_in(raw_img, seg_mask)
+    dilute_raw = _mean_in(raw_img, nucleoplasm_mask)
+    if np.isnan(dilute_raw) or dilute_raw == 0 or np.isnan(gc_raw):
+        pc_value = float("nan")
     else:
-        dilute_value_raw = float(np.mean(nucleoplasm_pixels_raw))
-        pc_value = round(gc_value_raw / dilute_value_raw, 3)
+        pc_value = round(gc_raw / dilute_raw, 3)
 
-    # measure nuclear area
-    # nuclear_area = round((np.count_nonzero(nucleus_mask) *(0.08*0.08)), 3)
-
-    # add to dataframe
-    df.loc[0,df.columns] = pd.Series([cell_id,bg_value,dilute_value,gc_value,total_value,pc_value],index=df.columns)
-
+    # Map semantic names so column order in measured_parameters cannot swap values
+    semantic = {
+        "cell_id": cell_id,
+        "C_bg": bg_value,
+        "C_dilute": dilute_value,
+        "C_dense": gc_value,
+        "pc": pc_value,
+        "total": total_value,
+    }
+    df = _empty_row_df(measured_parameters)
+    for col in measured_parameters:
+        if col in semantic:
+            df.loc[0, col] = semantic[col]
     df["stage"] = extract_stage(cell_id)
-
     return df
 
-def group_sort_larval_df(df_list: List):
-    """
-    ----------
-    Parameters:
-    -----------
-    df_list: List
-        a list of measurement dfs, should have the same columns
-    Returns:
-    grouped_df: pandas dataframe
-        the grouped df that has been sorted based on larval stages
-    """
+
+def group_sort_larval_df(df_list: List) -> pd.DataFrame:
+    """Concatenate measurement DataFrames and sort by larval stage."""
     grouped_df = pd.concat(df_list, axis=0, ignore_index=True)
-    grouped_df = grouped_df.sort_values(by="stage", ascending=True)
-    grouped_df = grouped_df.reset_index(drop=True)
-    return grouped_df
+    return _sort_by_stage(grouped_df)
 
-################################################
-# function realted to get extreme CV values    #
-# and plot image with gc contours              #
-################################################
-def replace_at_index(input_string, character, new_value):
-    # get the index of the character
-    index = input_string.find(character)
-    # Convert the input string to a list of characters
-    char_list = list(input_string)
 
-    # Replace the character at the specified index with the new value
-    char_list[index] = new_value
+# ---------------------------------------------------------------------------
+# visualization helpers
+# ---------------------------------------------------------------------------
 
-    # Convert the modified list back to a string
-    modified_string = ''.join(char_list)
+def replace_at_index(input_string: str, character: str, new_value: str) -> str:
+    """Replace the first occurrence of ``character`` in ``input_string``."""
+    return input_string.replace(character, new_value, 1)
 
-    return modified_string
 
-def seg_hole_filled_raw(master_seg_dir:str, master_raw_dir:str, cell_id:str, channel: int):
-    # read images
+def seg_hole_filled_raw(master_seg_dir: str, master_raw_dir: str, cell_id: str, channel: int):
+    """Load hole-filled mask + raw stack and return max-projection + contours."""
     seg_hole_filled = import_imgs(os.path.join(master_seg_dir, cell_id), "hole_filled.tif")
     raw_img = import_imgs(os.path.join(master_raw_dir, cell_id), "Composite_stack.tif")
-
-    # maximal projection mask
     max_proj_mask = np.max(seg_hole_filled, axis=0)
-    # find contours of seg mask
     contours_seg = find_contours(max_proj_mask, 0.1)
-    # corresponding raw image
-    max_raw = np.max(raw_img[...,channel], axis=0)
-
+    max_raw = np.max(raw_img[..., channel], axis=0)
     return max_raw, contours_seg
 
-def plot_raw_contour(raw: np.array, contours: np.array, cv:float, cell_id:str, channel: int, min_or_max_cv: str, save_dir = None, save_fig: bool = False):
+
+def plot_raw_contour(
+    raw: np.ndarray,
+    contours,
+    cv: float,
+    cell_id: str,
+    channel: int,
+    min_or_max_cv: str,
+    save_dir=None,
+    save_fig: bool = False,
+):
+    """Plot raw max-projection with GC contours overlaid."""
     new_cell_id = replace_at_index(cell_id, os.sep, "_")
-    fig, axs = plt.subplots(1,1,figsize=(4,4))
+    fig, axs = plt.subplots(1, 1, figsize=(4, 4))
     axs.imshow(raw, cmap="gray")
     for contour in contours:
-        axs.plot(contour[:,1], contour[:,0], linewidth=2, color="red", linestyle="dashed")
+        axs.plot(contour[:, 1], contour[:, 0], linewidth=2, color="red", linestyle="dashed")
     axs.set_title(f"{new_cell_id} channel {channel} cv = {cv:.2f}", fontsize=10)
     axs.axis("off")
     plt.tight_layout()
-    if save_dir != None:
+    if save_dir is not None:
         if save_fig:
-            plt.savefig(os.path.join(save_dir, f"{new_cell_id}_channel_{channel}_{min_or_max_cv}_cv_{cv:.2f}.svg"), bbox_inches="tight")
+            plt.savefig(
+                os.path.join(save_dir, f"{new_cell_id}_channel_{channel}_{min_or_max_cv}_cv_{cv:.2f}.svg"),
+                bbox_inches="tight",
+            )
         plt.close()
     else:
         plt.show()

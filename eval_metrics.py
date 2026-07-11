@@ -1,5 +1,4 @@
-"""
-Zero-dependency evaluation metrics for binary segmentation masks.
+"""Zero-dependency evaluation metrics for binary segmentation masks.
 
 Usage:
     from eval_metrics import dice_coefficient, iou, precision_recall
@@ -8,8 +7,13 @@ All functions accept numpy arrays of any shape and treat positive (>0) pixels
 as foreground.
 """
 
-import numpy as np
 from typing import Tuple
+
+import numpy as np
+
+
+def _foreground(pred: np.ndarray, gt: np.ndarray):
+    return pred > 0, gt > 0
 
 
 def dice_coefficient(pred: np.ndarray, gt: np.ndarray) -> float:
@@ -17,8 +21,7 @@ def dice_coefficient(pred: np.ndarray, gt: np.ndarray) -> float:
 
     Returns 0.0 when both masks are empty.
     """
-    pred_pos = pred > 0
-    gt_pos = gt > 0
+    pred_pos, gt_pos = _foreground(pred, gt)
     intersection = np.logical_and(pred_pos, gt_pos).sum()
     denom = pred_pos.sum() + gt_pos.sum()
     return float(2 * intersection / denom) if denom > 0 else 0.0
@@ -29,8 +32,7 @@ def iou(pred: np.ndarray, gt: np.ndarray) -> float:
 
     Returns 0.0 when both masks are empty.
     """
-    pred_pos = pred > 0
-    gt_pos = gt > 0
+    pred_pos, gt_pos = _foreground(pred, gt)
     intersection = np.logical_and(pred_pos, gt_pos).sum()
     union = np.logical_or(pred_pos, gt_pos).sum()
     return float(intersection / union) if union > 0 else 0.0
@@ -46,8 +48,7 @@ def precision_recall(pred: np.ndarray, gt: np.ndarray) -> Tuple[float, float]:
     recall : float
         TP / (TP + FN); 0.0 if gt is empty.
     """
-    pred_pos = pred > 0
-    gt_pos = gt > 0
+    pred_pos, gt_pos = _foreground(pred, gt)
     tp = np.logical_and(pred_pos, gt_pos).sum()
     fp = np.logical_and(pred_pos, ~gt_pos).sum()
     fn = np.logical_and(~pred_pos, gt_pos).sum()
