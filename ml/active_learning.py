@@ -22,16 +22,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from pipeline.qc import LOCAL_ADJUST_MAX, LOCAL_ADJUST_MIN
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Search space definition
 # ---------------------------------------------------------------------------
 
-# Each entry: (name, low, high, dtype)  — all floats for GP compatibility
+# Each entry: (name, low, high, dtype)  — all floats for GP compatibility.
+# local_adjust bounds are shared with pipeline.qc QC retries.
 _SPACE_DEFS: List[Tuple[str, float, float, str]] = [
     ("sigma",          0.25, 2.0,  "float"),
-    ("local_adjust",   0.90, 1.20, "float"),
+    ("local_adjust",   LOCAL_ADJUST_MIN, LOCAL_ADJUST_MAX, "float"),
     ("log_sigma_min",  1.5,  4.0,  "float"),
     ("log_sigma_max",  3.0,  6.0,  "float"),
     ("mini_size_spot", 5.0,  80.0, "float"),   # stored as float, cast to int when used

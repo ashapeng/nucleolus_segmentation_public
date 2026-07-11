@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from config_loader import load_config
 from pipeline.qc import qc_masks, suggest_param_overrides
 from pipeline.segment import run_gc_segment
 from pipeline.types import MaskPaths, QCReport
@@ -23,9 +24,13 @@ def segment_with_qc(
     Returns the last successful mask paths (even if final QC is RED) and all QC reports.
     If segmentation itself fails, returns ``(None, reports)``.
     """
+    if config is None:
+        config = load_config()
+
     reports: List[QCReport] = []
     overrides: Optional[Dict[str, Any]] = None
     paths: Optional[MaskPaths] = None
+    current_local_adjust = float(config["segmentation"]["gc_segment"]["local_adjust"])
 
     for attempt in range(max_attempts):
         try:
@@ -39,8 +44,13 @@ def segment_with_qc(
         if report.status in ("GREEN", "AMBER"):
             return paths, reports
 
-        overrides = suggest_param_overrides(report, attempt=attempt)
+        overrides = suggest_param_overrides(
+            report,
+            attempt=attempt,
+            current_local_adjust=current_local_adjust,
+        )
         if overrides is None:
             break
+        current_local_adjust = float(overrides["local_adjust"])
 
     return paths, reports
