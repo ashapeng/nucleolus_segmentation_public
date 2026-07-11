@@ -87,7 +87,11 @@ def measure_shapes(
 
 
 def measure_intensity_cell(cell_dir: str, cell_id: str) -> pd.DataFrame:
-    """Intensity / partition-coefficient metrics for one cell (max-intensity Z projection path)."""
+    """Intensity / partition-coefficient metrics for one cell (MIP + ch2 bg-sub path).
+
+    Background subtraction runs on the 2D MIP channel via ``seg_util.bg_subtraction``
+    (supports ``(Y,X)``). ``pc`` still uses raw means inside GC vs nucleoplasm.
+    """
     raw = import_imgs(cell_dir, "Composite_stack.tif", is_mask=False)
     if raw.ndim == 3:
         raw = np.expand_dims(raw, axis=-1)
@@ -96,7 +100,7 @@ def measure_intensity_cell(cell_dir: str, cell_id: str) -> pd.DataFrame:
     gc = import_imgs(cell_dir, "gc.tif", is_mask=True)
     hole_filled = import_imgs(cell_dir, "hole_filled.tif", is_mask=True)
 
-    # Use mid / max projection style similar to notebooks: operate on max Z for 2D ROIs
+    # Max-intensity projection for 2D ROIs (notebook Csat uses largest-Z instead)
     raw_mip = np.max(raw, axis=0)
     nucleus_2d = np.max(nucleus, axis=0)
     background_2d = np.max(background, axis=0) if background.ndim == 3 else background
