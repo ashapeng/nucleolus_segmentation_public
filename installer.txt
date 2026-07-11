@@ -12,3 +12,6 @@ napari
 matplotlib
 pyyaml
 pytest
+# Optional: Easy-adopt trust reports (pip install easy-adopt)
+# Optional LLM: openai
+# Optional ML research backends: nnunetv2, nibabel, cellpose

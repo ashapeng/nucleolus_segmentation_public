@@ -27,10 +27,13 @@ class RunContext:
     run_dir: Optional[Path] = None
     manifest: Optional[Manifest] = None
     qc_reports: List[QCReport] = field(default_factory=list)
+    trust_reports: List[Dict[str, Any]] = field(default_factory=list)
     shapes_df: Optional[pd.DataFrame] = None
     intensity_df: Optional[pd.DataFrame] = None
     notes: List[str] = field(default_factory=list)
     goal: str = ""
+    allow_ml_backend: bool = False
+    segment_backend: str = "classical"
 
 
 TOOL_SPECS: List[Dict[str, Any]] = [
@@ -119,7 +122,10 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "run_easy_adopt",
-            "description": "Optional Easy-adopt trust report (informational; do not auto-swap segmenter on RED).",
+            "description": (
+                "Optional Easy-adopt trust report (informational; do not auto-swap "
+                "segmenter on RED/UNKNOWN). Parses Trust Report GREEN|AMBER|RED when present."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -205,22 +211,29 @@ def execute_tool(name: str, arguments: Dict[str, Any], context: RunContext) -> D
             arguments["cell_dir"],
             tool=arguments.get("tool", "stardist"),
             structure=arguments.get("structure", "nucleolus_gc"),
+            cell_id=arguments.get("cell_id"),
+            escalation=arguments.get("escalation"),
         )
+        context.trust_reports.append(trust)
         save_json(run_dir, "easy_adopt_last.json", trust)
         result = trust
     elif name == "finalize_run":
         if context.manifest is None:
             context.manifest = inventory_experiment(context.root)
         save_qc_reports(run_dir, context.qc_reports)
+        if context.trust_reports:
+            save_json(run_dir, "easy_adopt.json", {"results": context.trust_reports})
         report = write_run_report(
             run_dir,
             context.manifest,
             context.qc_reports,
             shapes_df=context.shapes_df,
             intensity_df=context.intensity_df,
+            trust_reports=context.trust_reports,
             mode=arguments.get("mode", "llm"),
             goal=context.goal,
             extra_notes=context.notes,
+            segment_backend=context.segment_backend,
         )
         result = {"report": str(report), "run_dir": str(run_dir)}
     else:

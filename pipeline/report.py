@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Dict, Any
 
 import pandas as pd
 
+from pipeline.trust import summarize_trust_reports
 from pipeline.types import Manifest, QCReport
 
 
@@ -50,9 +51,11 @@ def write_run_report(
     qc_reports: Iterable[QCReport],
     shapes_df: Optional[pd.DataFrame] = None,
     intensity_df: Optional[pd.DataFrame] = None,
+    trust_reports: Optional[List[Dict[str, Any]]] = None,
     mode: str = "no-llm",
     goal: str = "",
     extra_notes: Optional[List[str]] = None,
+    segment_backend: str = "classical",
 ) -> Path:
     """Write a deterministic markdown report for the run."""
     run_dir = Path(run_dir)
@@ -67,6 +70,7 @@ def write_run_report(
         f"- **Root:** `{manifest.root}`",
         f"- **Goal:** {goal or '(deterministic full run)'}",
         f"- **Resolution (z,y,x µm):** {manifest.resolution_3d}",
+        f"- **Segment backend:** `{segment_backend}`",
         "",
         "## Inventory",
         "",
@@ -84,6 +88,8 @@ def write_run_report(
         lines.append("RED cells:")
         lines.extend(f"- `{c}`" for c in red_cells)
         lines.append("")
+
+    lines.extend(summarize_trust_reports(trust_reports or []))
 
     lines.extend(["## Shape summary", ""])
     if shapes_df is not None and not shapes_df.empty and "volume" in shapes_df.columns:
@@ -117,6 +123,7 @@ def write_run_report(
             "",
             "- `manifest.json`",
             "- `qc.jsonl`",
+            "- `easy_adopt.json` (if trust evaluated)",
             "- `shapes.csv` (if measured)",
             "- `intensity.csv` (if measured)",
             "- `trace.jsonl`",

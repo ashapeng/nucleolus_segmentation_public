@@ -60,6 +60,13 @@ pip install easy-adopt
 easy-adopt --tool stardist --structure nucleolus_gc --cell <your_cell_folder>
 ```
 
+Optional ML backends (`ml/`: nnU-Net, Cellpose) are for research evaluation and
+notebooks. The production `pipeline/` path stays on classical GC segmentation.
+Flipping `ml.default_backend` alone does **not** change `python -m pipeline run`;
+use `--allow-ml-backend` only after a non-RED Easy-adopt trust probe. Final QC RED
+cells automatically attach an informational Easy-adopt escalation (`tool=cellpose`)
+when the package is installed.
+
 # Programmatic / agentic runs
 
 The `pipeline/` package wraps the classical GC workflow so it can run without notebooks
@@ -72,11 +79,17 @@ python -m pipeline inventory --root test_image
 # Deterministic end-to-end run (default): segment → QC → measure → report
 python -m pipeline run --root test_image --no-llm --max-cells 1
 
+# Optional: per-cell Easy-adopt trust reports (+ automatic QC-RED escalation)
+python -m pipeline run --root test_image --no-llm --with-easy-adopt --max-cells 1
+
+# Optional: allow ML backend from config only after non-RED Easy-adopt trust
+python -m pipeline run --root test_image --no-llm --allow-ml-backend
+
 # Optional LLM orchestrator (requires OPENAI_API_KEY and: pip install openai)
 python -m pipeline run --root test_image --llm --goal "Segment L2 cells and write a report" --stage L2
 ```
 
-Artifacts land in git-ignored `runs/<timestamp>/` (`report.md`, `manifest.json`, `qc.jsonl`, CSVs).
+Artifacts land in git-ignored `runs/<timestamp>/` (`report.md`, `manifest.json`, `qc.jsonl`, CSVs, optional `easy_adopt.json`).
 
 Design and task plan:
 - `docs/superpowers/specs/2026-07-10-agentic-ai-pipeline-design.md`
