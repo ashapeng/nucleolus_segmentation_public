@@ -59,3 +59,25 @@ high IoU). The `nucleolus_gc` structure contract is shipped there.
 pip install easy-adopt
 easy-adopt --tool stardist --structure nucleolus_gc --cell <your_cell_folder>
 ```
+
+# Programmatic / agentic runs
+
+The `pipeline/` package wraps the classical GC workflow so it can run without notebooks
+(and optionally under an LLM orchestrator in `agent/`).
+
+```bash
+# Inventory cell folders
+python -m pipeline inventory --root test_image
+
+# Deterministic end-to-end run (default): segment → QC → measure → report
+python -m pipeline run --root test_image --no-llm --max-cells 1
+
+# Optional LLM orchestrator (requires OPENAI_API_KEY and: pip install openai)
+python -m pipeline run --root test_image --llm --goal "Segment L2 cells and write a report" --stage L2
+```
+
+Artifacts land in git-ignored `runs/<timestamp>/` (`report.md`, `manifest.json`, `qc.jsonl`, CSVs).
+
+Design and task plan:
+- `docs/superpowers/specs/2026-07-10-agentic-ai-pipeline-design.md`
+- `docs/superpowers/plans/2026-07-10-agentic-ai-pipeline.md`

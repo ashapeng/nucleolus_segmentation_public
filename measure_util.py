@@ -30,10 +30,13 @@ SHAPE_PARAMS_3D = [
 def extract_stage(cell_id: str) -> str:
     """Extract larval stage (L1–L4) from a cell_id string.
 
+    Underscores are common in experiment folder names (e.g. ``20220304_L1/10_2``),
+    so this uses an alphanumeric boundary rather than ``\\b`` (which treats ``_``
+    as a word character and would miss ``_L1``).
+
     Raises ValueError if the stage cannot be determined.
     """
-    # Underscores are word chars, so \b fails on IDs like "20220304_L1/..."
-    match = re.search(r"(?<![A-Za-z])(L[1-4])(?![A-Za-z0-9])", cell_id)
+    match = re.search(r"(?<![A-Za-z0-9])(L[1-4])(?![A-Za-z0-9])", cell_id)
     if match is None:
         raise ValueError(f"Cannot extract larval stage from cell_id: {cell_id!r}")
     return match.group(1)
@@ -482,6 +485,7 @@ def concentration_gc(
         "C_bg": bg_value,
         "C_dilute": dilute_value,
         "C_dense": gc_value,
+        "C_total": total_value,
         "pc": pc_value,
         "total": total_value,
     }

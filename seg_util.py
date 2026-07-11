@@ -258,6 +258,7 @@ def global_otsu(
     _zero_z_cap_slices(global_mask)
 
     if keep_largest:
+        # _largest_label_mask already returns an empty mask when no labels exist
         labeled_mask, n_labels = label(global_mask, return_num=True, connectivity=1)
         logger.debug("number of mask objects: %d", n_labels)
         segmented = _largest_label_mask(labeled_mask)
