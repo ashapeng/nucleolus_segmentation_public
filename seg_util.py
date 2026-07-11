@@ -355,18 +355,40 @@ def final_gc_holes(spot_mask: np.ndarray, nucleolus_mask: np.ndarray):
 
     return _to_uint8_mask(final_gc), _to_uint8_mask(hole_filled)
 
-
 def gc_segment(
     raw_image: np.ndarray,
     nucleus_mask: np.ndarray,
     sigma: float = None,
     local_adjust_for_GC: float = None,
     config=None,
+    backend: str = "classical",
 ):
     """End-to-end granular-component segmentation pipeline.
 
-    Returns ``(final_gc, dark_spot, hole_filled_gc)`` as uint8 masks.
+    Parameters
+    ----------
+    backend : str
+        ``"classical"`` (default), ``"nnunet"``, or ``"cellpose"``.
+
+    Returns
+    -------
+    final_gc, dark_spot, hole_filled_gc : uint8 masks
+        For ML backends, ``dark_spot`` is ``None`` and hole-filled equals GC.
     """
+    if backend == "nnunet":
+        from ml.predict_nnunet import gc_segment_nnunet
+        return gc_segment_nnunet(raw_image, nucleus_mask)
+
+    if backend == "cellpose":
+        from ml.predict_cellpose import gc_segment_cellpose
+        if config is None:
+            from config_loader import load_config
+            config = load_config()
+        model_path = config.get("ml", {}).get("cellpose", {}).get("model_path", None)
+        gc_mask, _ = gc_segment_cellpose(raw_image, nucleus_mask, model_path=model_path)
+        return gc_mask, None, gc_mask.copy()
+
+    # --- classical backend ---
     if config is None:
         from config_loader import load_config
         config = load_config()
