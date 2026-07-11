@@ -24,6 +24,7 @@ def run_goal(
     max_cells: Optional[int] = None,
     with_intensity: bool = False,
     with_easy_adopt: bool = False,
+    allow_ml_backend: bool = False,
     runs_base: str = "runs",
     max_steps: int = 40,
 ) -> Path:
@@ -37,6 +38,7 @@ def run_goal(
             max_cells=max_cells,
             with_intensity=with_intensity,
             with_easy_adopt=with_easy_adopt,
+            allow_ml_backend=allow_ml_backend,
             runs_base=runs_base,
             goal=goal,
         )
@@ -47,6 +49,7 @@ def run_goal(
         max_cells=max_cells,
         with_intensity=with_intensity,
         with_easy_adopt=with_easy_adopt,
+        allow_ml_backend=allow_ml_backend,
         runs_base=runs_base,
         max_steps=max_steps,
     )
@@ -64,6 +67,7 @@ def _run_llm(
     max_cells: Optional[int],
     with_intensity: bool,
     with_easy_adopt: bool,
+    allow_ml_backend: bool,
     runs_base: str,
     max_steps: int,
 ) -> Path:
@@ -79,13 +83,21 @@ def _run_llm(
         raise RuntimeError("OPENAI_API_KEY not set. Pass --no-llm for deterministic runs.")
 
     client = OpenAI()
-    ctx = RunContext(root=root, runs_base=runs_base, goal=goal)
+    ctx = RunContext(
+        root=root,
+        runs_base=runs_base,
+        goal=goal,
+        allow_ml_backend=allow_ml_backend,
+    )
     user = (
         f"Goal: {goal}\nRoot: {root}\n"
         f"Stage filter: {stage or 'all'}\nMax cells: {max_cells or 'all'}\n"
         f"With intensity: {with_intensity}\nWith easy-adopt: {with_easy_adopt}\n"
+        f"Allow ML backend: {allow_ml_backend}\n"
         "Inventory first, segment_with_qc each included cell (respect max_cells), "
-        "measure_shapes, optionally intensity/easy-adopt, then finalize_run."
+        "measure_shapes, optionally intensity/easy-adopt, then finalize_run. "
+        "Never swap to nnunet/cellpose unless Easy-adopt trust is non-RED and "
+        "allow_ml_backend is true."
     )
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
