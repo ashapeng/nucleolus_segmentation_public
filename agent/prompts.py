@@ -10,5 +10,7 @@ Rules:
 - Easy-adopt trust reports are informational in v1; never silently replace gc_segment when trust is RED or UNKNOWN.
 - ml.default_backend nnunet|cellpose must not be used unless allow_ml_backend is true AND Easy-adopt trust is GREEN or AMBER.
 - Finish by calling finalize_run so artifacts and report.md are written.
+- Reports include a deterministic Narrative section grounded only in CSV/QC numbers.
+- Use compare_runs to diff two existing runs/<id>/ directories when asked for experiment comparison.
 - Keep responses short; prefer tool calls over prose.
 """

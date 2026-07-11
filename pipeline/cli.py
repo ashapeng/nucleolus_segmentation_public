@@ -48,6 +48,20 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     run.add_argument("--runs-base", default="runs", help="Directory for run artifacts")
+
+    cmp = sub.add_parser("compare", help="Compare two runs/<id>/ artifact directories")
+    cmp.add_argument("--a", required=True, help="Path to run A (baseline)")
+    cmp.add_argument("--b", required=True, help="Path to run B (candidate)")
+    cmp.add_argument(
+        "--out",
+        default=None,
+        help="Markdown output path (default: <b>/compare_vs_<a>.md)",
+    )
+    cmp.add_argument(
+        "--json",
+        action="store_true",
+        help="Also print the comparison JSON payload to stdout",
+    )
     return parser
 
 
@@ -102,6 +116,25 @@ def main(argv: Optional[List[str]] = None) -> int:
                 goal=args.goal,
             )
         print(str(run_dir))
+        return 0
+
+    if args.command == "compare":
+        from pathlib import Path
+
+        from pipeline.compare import compare_runs, write_compare_report
+
+        run_a = Path(args.a)
+        run_b = Path(args.b)
+        if not run_a.is_dir():
+            print(f"Run A not found: {run_a}", file=sys.stderr)
+            return 1
+        if not run_b.is_dir():
+            print(f"Run B not found: {run_b}", file=sys.stderr)
+            return 1
+        out = write_compare_report(run_a, run_b, out_path=args.out)
+        print(str(out))
+        if args.json:
+            print(json.dumps(compare_runs(run_a, run_b), indent=2))
         return 0
 
     parser.error(f"Unknown command: {args.command}")

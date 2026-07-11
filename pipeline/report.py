@@ -8,6 +8,7 @@ from typing import Iterable, List, Optional, Dict, Any
 
 import pandas as pd
 
+from pipeline.narrative import build_narrative, figure_caption
 from pipeline.trust import summarize_trust_reports
 from pipeline.types import Manifest, QCReport
 
@@ -39,6 +40,9 @@ def plot_and_export(df: pd.DataFrame, out_dir: Path, measurement: str = "volume"
                 fig_path.parent.mkdir(parents=True, exist_ok=True)
                 fig.savefig(fig_path, bbox_inches="tight")
                 artifacts.append(fig_path)
+                caption_path = fig_path.with_suffix(".caption.txt")
+                caption_path.write_text(figure_caption(measurement) + "\n", encoding="utf-8")
+                artifacts.append(caption_path)
             plt.close(fig)
         except Exception:
             pass
@@ -72,18 +76,28 @@ def write_run_report(
         f"- **Resolution (z,y,x µm):** {manifest.resolution_3d}",
         f"- **Segment backend:** `{segment_backend}`",
         "",
-        "## Inventory",
-        "",
-        f"- Included cells: **{len(manifest.cells_included)}**",
-        f"- Excluded cells: **{len(manifest.cells_excluded)}**",
-        "",
-        "## QC summary",
-        "",
-        f"- GREEN: {counts.get('GREEN', 0)}",
-        f"- AMBER: {counts.get('AMBER', 0)}",
-        f"- RED: {counts.get('RED', 0)}",
+        "## Narrative",
         "",
     ]
+    for paragraph in build_narrative(manifest, reports, shapes_df, intensity_df):
+        lines.append(paragraph)
+        lines.append("")
+
+    lines.extend(
+        [
+            "## Inventory",
+            "",
+            f"- Included cells: **{len(manifest.cells_included)}**",
+            f"- Excluded cells: **{len(manifest.cells_excluded)}**",
+            "",
+            "## QC summary",
+            "",
+            f"- GREEN: {counts.get('GREEN', 0)}",
+            f"- AMBER: {counts.get('AMBER', 0)}",
+            f"- RED: {counts.get('RED', 0)}",
+            "",
+        ]
+    )
     if red_cells:
         lines.append("RED cells:")
         lines.extend(f"- `{c}`" for c in red_cells)

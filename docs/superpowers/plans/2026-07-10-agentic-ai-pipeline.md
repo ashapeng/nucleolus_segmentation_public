@@ -434,12 +434,12 @@ git commit -m "Integrate optional Easy-adopt trust reports into pipeline runs"
 
 ## Phase 3 — Stretch (separate follow-up)
 
-Not required to close the first implementation PR series:
+Implemented in follow-up (narrative + cross-run compare; MCP/VLM still deferred):
 
-- LLM-written narrative paragraphs grounded only in CSV stats (cite numbers).
-- Cross-run comparison (`runs/a` vs `runs/b`).
-- Optional VLM mid-Z QC (assistive).
-- MCP server wrapping `agent/tools.py`.
+- [x] Deterministic narrative paragraphs in `report.md` grounded only in CSV/QC stats (cite numbers); stage-trend language; figure captions beside boxplots.
+- [x] Cross-run comparison (`python -m pipeline compare --a runs/a --b runs/b`) plus `compare_runs` agent tool.
+- [ ] Optional VLM mid-Z QC (assistive).
+- [ ] MCP server wrapping `agent/tools.py`.
 
 ---
 

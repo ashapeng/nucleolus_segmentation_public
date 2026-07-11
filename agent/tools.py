@@ -11,6 +11,7 @@ import pandas as pd
 
 from pipeline.inventory import inventory_experiment
 from pipeline.measure import measure_intensity_batch, measure_shapes
+from pipeline.compare import compare_runs, write_compare_report
 from pipeline.qc import qc_masks
 from pipeline.report import plot_and_export, write_run_report
 from pipeline.run_store import append_trace, create_run_dir, save_json, save_manifest, save_qc_reports
@@ -148,6 +149,28 @@ TOOL_SPECS: List[Dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "compare_runs",
+            "description": (
+                "Compare two existing runs/<id>/ directories (inventory, final QC, "
+                "shape/intensity deltas) and write a markdown + JSON report."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "run_a": {"type": "string", "description": "Baseline run directory"},
+                    "run_b": {"type": "string", "description": "Candidate run directory"},
+                    "out": {
+                        "type": "string",
+                        "description": "Optional markdown output path",
+                    },
+                },
+                "required": ["run_a", "run_b"],
+            },
+        },
+    },
 ]
 
 
@@ -236,6 +259,22 @@ def execute_tool(name: str, arguments: Dict[str, Any], context: RunContext) -> D
             segment_backend=context.segment_backend,
         )
         result = {"report": str(report), "run_dir": str(run_dir)}
+    elif name == "compare_runs":
+        out = arguments.get("out")
+        if not out:
+            out = str(run_dir / f"compare_vs_{Path(arguments['run_a']).name}.md")
+        report_path = write_compare_report(arguments["run_a"], arguments["run_b"], out_path=out)
+        payload = compare_runs(arguments["run_a"], arguments["run_b"])
+        result = {
+            "report": str(report_path),
+            "json": str(Path(report_path).with_suffix(".json")),
+            "summary": {
+                "delta_included": payload["inventory"]["delta_included_b_minus_a"],
+                "status_flips": len(payload["qc"]["status_flips"]),
+                "delta_mean_volume": payload["shapes"]["delta_mean_volume_b_minus_a"],
+                "delta_mean_pc": payload["intensity"]["delta_mean_pc_b_minus_a"],
+            },
+        }
     else:
         raise ValueError(f"Unknown tool: {name}")
 
