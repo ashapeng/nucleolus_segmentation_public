@@ -13,9 +13,18 @@ from pipeline.types import QCReport
 
 _STATUS_RANK = {"GREEN": 0, "AMBER": 1, "RED": 2}
 
+# Shared with ml.active_learning search space — keep QC retries inside the same box.
+LOCAL_ADJUST_MIN = 0.90
+LOCAL_ADJUST_MAX = 1.20
+LOCAL_ADJUST_STEP = 0.05
+
 
 def _worst(*statuses: str) -> str:
     return max(statuses, key=lambda s: _STATUS_RANK.get(s, 0))
+
+
+def _clamp_local_adjust(value: float) -> float:
+    return float(min(LOCAL_ADJUST_MAX, max(LOCAL_ADJUST_MIN, value)))
 
 
 def qc_masks(cell_dir: str, cell_id: Optional[str] = None, gc_name: str = "gc.tif") -> QCReport:
@@ -80,17 +89,34 @@ def qc_masks(cell_dir: str, cell_id: Optional[str] = None, gc_name: str = "gc.ti
     )
 
 
-def suggest_param_overrides(report: QCReport, attempt: int) -> Optional[Dict[str, float]]:
-    """Suggest bounded ``local_adjust`` tweaks; None when retries are exhausted."""
+def suggest_param_overrides(
+    report: QCReport,
+    attempt: int,
+    *,
+    current_local_adjust: float,
+) -> Optional[Dict[str, float]]:
+    """Suggest a bounded ``local_adjust`` tweak from the value that just failed.
+
+    Steps by ``LOCAL_ADJUST_STEP`` toward a more inclusive (lower) or stricter
+    (higher) threshold, clamped to ``[LOCAL_ADJUST_MIN, LOCAL_ADJUST_MAX]``
+    (same box as active learning). Returns ``None`` when retries are exhausted
+    or the value is already at the relevant bound.
+    """
     if attempt >= 3 or report.status == "GREEN":
         return None
+
+    current = float(current_local_adjust)
     if report.empty_gc or report.gc_fraction < 0.05:
-        delta = -0.05 * (attempt + 1)
         # lower local_adjust → typically more inclusive Otsu local threshold
-        return {"local_adjust": max(0.9, 1.08 + delta)}
-    if report.gc_fraction > 0.40:
-        delta = 0.05 * (attempt + 1)
-        return {"local_adjust": min(1.3, 1.08 + delta)}
-    if report.outside_nucleus_fraction > 0.01:
-        return {"local_adjust": min(1.3, 1.08 + 0.05 * (attempt + 1))}
-    return None
+        proposed = current - LOCAL_ADJUST_STEP
+    elif report.gc_fraction > 0.40:
+        proposed = current + LOCAL_ADJUST_STEP
+    elif report.outside_nucleus_fraction > 0.01:
+        proposed = current + LOCAL_ADJUST_STEP
+    else:
+        return None
+
+    nxt = _clamp_local_adjust(proposed)
+    if abs(nxt - current) < 1e-9:
+        return None
+    return {"local_adjust": nxt}

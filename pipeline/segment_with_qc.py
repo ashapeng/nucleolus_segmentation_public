@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from config_loader import load_config
 from pipeline.qc import qc_masks, suggest_param_overrides
 from pipeline.segment import run_gc_segment
 from pipeline.types import MaskPaths, QCReport
@@ -30,9 +31,13 @@ def segment_with_qc(
     ``backend`` / ``allow_ml_backend`` / ``trust_status`` are forwarded to
     :func:`pipeline.segment.run_gc_segment` (classical by default; ML only when gated).
     """
+    if config is None:
+        config = load_config()
+
     reports: List[QCReport] = []
     overrides: Optional[Dict[str, Any]] = None
     paths: Optional[MaskPaths] = None
+    current_local_adjust = float(config["segmentation"]["gc_segment"]["local_adjust"])
 
     for attempt in range(max_attempts):
         try:
@@ -53,8 +58,13 @@ def segment_with_qc(
         if report.status in ("GREEN", "AMBER"):
             return paths, reports
 
-        overrides = suggest_param_overrides(report, attempt=attempt)
+        overrides = suggest_param_overrides(
+            report,
+            attempt=attempt,
+            current_local_adjust=current_local_adjust,
+        )
         if overrides is None:
             break
+        current_local_adjust = float(overrides["local_adjust"])
 
     return paths, reports
