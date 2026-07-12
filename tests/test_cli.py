@@ -58,5 +58,45 @@ def test_cli_run_no_llm(tmp_path):
     assert code == 0
     run_dirs = list(runs.iterdir())
     assert len(run_dirs) == 1
-    assert (run_dirs[0] / "report.md").is_file()
-    assert "## QC summary" in (run_dirs[0] / "report.md").read_text(encoding="utf-8")
+    report = (run_dirs[0] / "report.md").read_text(encoding="utf-8")
+    assert "## QC summary" in report
+    assert "## Narrative" in report
+
+
+def test_cli_compare(tmp_path, capsys):
+    from pipeline.run_store import save_manifest, save_qc_reports
+    from pipeline.types import CellRecord, Manifest, QCReport
+    import pandas as pd
+
+    def seed(name, included_volume):
+        run_dir = tmp_path / "runs" / name
+        run_dir.mkdir(parents=True)
+        save_manifest(
+            run_dir,
+            Manifest(
+                root=str(tmp_path),
+                resolution_3d=[0.2, 0.08, 0.08],
+                cells_included=[CellRecord("20220304_L1/10_2", str(tmp_path), "L1", True)],
+                cells_excluded=[],
+                config_snapshot={},
+            ),
+        )
+        save_qc_reports(
+            run_dir,
+            [QCReport("20220304_L1/10_2", "GREEN", 0.1, False, 0.0, [])],
+        )
+        pd.DataFrame(
+            {"cell_id": ["20220304_L1/10_2"], "stage": ["L1"], "volume": [included_volume]}
+        ).to_csv(run_dir / "shapes.csv", index=False)
+        return run_dir
+
+    run_a = seed("a", 10.0)
+    run_b = seed("b", 12.0)
+    out = tmp_path / "compare.md"
+    code = main(["compare", "--a", str(run_a), "--b", str(run_b), "--out", str(out)])
+    assert code == 0
+    printed = capsys.readouterr().out.strip().splitlines()[0]
+    assert printed == str(out)
+    text = out.read_text(encoding="utf-8")
+    assert "Cross-run comparison" in text
+    assert out.with_suffix(".json").is_file()

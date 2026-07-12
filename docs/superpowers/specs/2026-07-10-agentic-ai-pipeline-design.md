@@ -214,8 +214,10 @@ Prerequisite engineering (non-AI): extract notebook batch loops into these funct
 
 ### Phase 3 — Results narrative + experiment comparison
 
-- Cross-run diffs, stage-trend language, figure captions.
-- Optional VLM for visual QC of mid-Z slices (assistive, not ground truth).
+- Deterministic narrative paragraphs in `report.md` grounded only in CSV/QC numbers (stage-trend language, figure captions).
+- Cross-run diffs via `python -m pipeline compare --a runs/<a> --b runs/<b>`.
+- Optional VLM for visual QC of mid-Z slices (assistive, not ground truth) — deferred.
+- Optional MCP wrapper over `agent/tools.py` — deferred.
 
 ## 7. Success criteria
 

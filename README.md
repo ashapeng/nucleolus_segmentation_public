@@ -87,9 +87,12 @@ python -m pipeline run --root test_image --no-llm --allow-ml-backend
 
 # Optional LLM orchestrator (requires OPENAI_API_KEY and: pip install openai)
 python -m pipeline run --root test_image --llm --goal "Segment L2 cells and write a report" --stage L2
+
+# Compare two existing runs (inventory / final QC / shape+intensity deltas)
+python -m pipeline compare --a runs/<id_a> --b runs/<id_b>
 ```
 
-Artifacts land in git-ignored `runs/<timestamp>/` (`report.md`, `manifest.json`, `qc.jsonl`, CSVs, optional `easy_adopt.json`).
+Artifacts land in git-ignored `runs/<timestamp>/` (`report.md` with a deterministic Narrative section, `manifest.json`, `qc.jsonl`, CSVs, optional `easy_adopt.json`). Comparison writes markdown + JSON (`compare_vs_<a>.md` / `.json`).
 
 Design and task plan:
 - `docs/superpowers/specs/2026-07-10-agentic-ai-pipeline-design.md`

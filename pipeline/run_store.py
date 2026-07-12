@@ -12,9 +12,17 @@ from pipeline.types import Manifest, QCReport
 
 
 def create_run_dir(base: str = "runs") -> Path:
-    """Create ``runs/<UTC timestamp>/`` and standard subfolders."""
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = Path(base) / run_id
+    """Create ``runs/<UTC timestamp>/`` and standard subfolders.
+
+    If the second-resolution timestamp already exists, append ``_2``, ``_3``, …
+    so rapid successive runs do not clobber each other.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_dir = Path(base) / stamp
+    suffix = 2
+    while run_dir.exists():
+        run_dir = Path(base) / f"{stamp}_{suffix}"
+        suffix += 1
     (run_dir / "figures").mkdir(parents=True, exist_ok=True)
     return run_dir
 
