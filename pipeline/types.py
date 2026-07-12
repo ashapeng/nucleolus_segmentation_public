@@ -45,6 +45,10 @@ class QCReport:
     empty_gc: bool
     outside_nucleus_fraction: float
     messages: List[str] = field(default_factory=list)
+    # Soft signals only — do not drive RED retries / local_adjust by themselves.
+    n_gc_objects: int = 0
+    mid_z_index: Optional[int] = None
+    soft_flags: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
