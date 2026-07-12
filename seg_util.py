@@ -11,11 +11,11 @@ from skimage.filters import threshold_otsu, threshold_triangle
 from skimage.measure import label
 from skimage.morphology import (
     ball,
-    binary_closing,
-    binary_dilation,
-    binary_erosion,
-    binary_opening,
+    closing,
+    dilation,
     disk,
+    erosion,
+    opening,
     remove_small_holes,
     remove_small_objects,
 )
@@ -45,6 +45,28 @@ _GLOBAL_THRESH = {
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+def _remove_small_objects(ar: np.ndarray, min_size: int, connectivity: int = 1) -> np.ndarray:
+    """Wrap skimage remove_small_objects with 0.26+ ``max_size`` API.
+
+    Legacy ``min_size`` removed objects with size *strictly less than* ``min_size``.
+    New ``max_size`` removes size ``<= max_size``, so ``max_size = min_size - 1``.
+    """
+    return remove_small_objects(
+        np.asarray(ar, dtype=bool),
+        max_size=max(0, int(min_size) - 1),
+        connectivity=connectivity,
+    )
+
+
+def _remove_small_holes(ar: np.ndarray, area_threshold: int, connectivity: int = 1) -> np.ndarray:
+    """Wrap skimage remove_small_holes with 0.26+ ``max_size`` API (same off-by-one)."""
+    return remove_small_holes(
+        np.asarray(ar, dtype=bool),
+        max_size=max(0, int(area_threshold) - 1),
+        connectivity=connectivity,
+    )
+
 
 def _percentile_clip_and_normalize(img: np.ndarray, percentile: float = 99.9) -> np.ndarray:
     """Clip to given percentile then min-max normalize to [0, 1]."""
@@ -140,8 +162,8 @@ def image_2d_seg(raw_img: np.ndarray, nucleus_mask: Optional[np.ndarray], sigma_
 
     post_seg = np.zeros_like(thresholded, dtype=np.uint8)
     for i in range(n_channels):
-        opened = binary_opening(thresholded[..., i], footprint=np.ones((3, 3)))
-        filled = remove_small_holes(opened)
+        opened = opening(thresholded[..., i].astype(bool), footprint=np.ones((3, 3), dtype=bool))
+        filled = _remove_small_holes(opened, area_threshold=64)
         labeled = label(filled, connectivity=2)
         if labeled.max() == 0:
             continue
@@ -247,8 +269,8 @@ def global_otsu(
     else:
         th_low_level = (threshold_triangle(img) + np.percentile(img, 50)) / 2
 
-    bw_low_level = remove_small_objects(img > th_low_level, min_size=mini_size, connectivity=1)
-    bw_low_level = binary_dilation(bw_low_level, footprint=ball(1))
+    bw_low_level = _remove_small_objects(img > th_low_level, min_size=mini_size, connectivity=1)
+    bw_low_level = dilation(bw_low_level, footprint=ball(1))
     _zero_z_cap_slices(bw_low_level)
 
     bw_high_level = np.zeros_like(bw_low_level)
@@ -268,11 +290,11 @@ def global_otsu(
         bw_high_level[np.logical_and(img > final_otsu * local_adjust, single_obj)] = 1
 
     def _close_fill_clean(slice_2d: np.ndarray) -> np.ndarray:
-        closed = binary_closing(slice_2d, footprint=disk(2))
-        filled = remove_small_holes(
-            closed.astype(bool), area_threshold=np.count_nonzero(closed), connectivity=2
+        closed = closing(slice_2d, footprint=disk(2))
+        filled = _remove_small_holes(
+            closed.astype(bool), area_threshold=int(np.count_nonzero(closed)), connectivity=2
         )
-        return remove_small_objects(filled, min_size=30, connectivity=2)
+        return _remove_small_objects(filled, min_size=30, connectivity=2)
 
     global_mask = _apply_per_slice(bw_high_level, _close_fill_clean)
     _zero_z_cap_slices(global_mask)
@@ -288,10 +310,10 @@ def global_otsu(
     struct2 = ndi.generate_binary_structure(2, 2)
 
     def _dilate_close_fill(slice_2d: np.ndarray) -> np.ndarray:
-        dilated = binary_dilation(slice_2d.astype(bool), footprint=disk(1))
-        closed = binary_closing(dilated, footprint=struct2)
-        return remove_small_holes(
-            closed, area_threshold=np.count_nonzero(closed), connectivity=2
+        dilated = dilation(slice_2d.astype(bool), footprint=disk(1))
+        closed = closing(dilated, footprint=struct2)
+        return _remove_small_holes(
+            closed, area_threshold=int(np.count_nonzero(closed)), connectivity=2
         )
 
     dilated_mask = _apply_per_slice(segmented, _dilate_close_fill)
@@ -317,7 +339,7 @@ def segment_spot(
     del arbitray_cutoff  # API compatibility only
     spot = (np.max(raw_img) - raw_img) if invert_raw else raw_img.copy()
 
-    nucleus_mask_eroded = binary_erosion(nucleus_mask, footprint=ball(2))
+    nucleus_mask_eroded = erosion(nucleus_mask, footprint=ball(2))
     _zero_z_cap_slices(nucleus_mask_eroded)
     eroded_bool = nucleus_mask_eroded.astype(bool)
 
@@ -343,9 +365,9 @@ def segment_spot(
     struct2 = ndi.generate_binary_structure(2, 2)
 
     def _open_clean_close(slice_2d: np.ndarray) -> np.ndarray:
-        opened = binary_opening(slice_2d, footprint=struct2)
-        cleaned = remove_small_objects(opened, min_size=10, connectivity=2)
-        return binary_closing(cleaned, footprint=struct2).astype(np.uint8)
+        opened = opening(slice_2d, footprint=struct2)
+        cleaned = _remove_small_objects(opened, min_size=10, connectivity=2)
+        return closing(cleaned, footprint=struct2).astype(np.uint8)
 
     spot_opened = _apply_per_slice(spot_by_log, _open_clean_close)
     spot_in_structure = np.logical_and(spot_opened, nucleolus_mask).astype(np.uint8)
@@ -357,7 +379,7 @@ def segment_spot(
             labeled[labeled == i] = 0
     multi_z = labeled > 0
 
-    size_filtered = remove_small_objects(multi_z, min_size=mini_size, connectivity=2)
+    size_filtered = _remove_small_objects(multi_z, min_size=mini_size, connectivity=2)
     return _to_uint8_mask(size_filtered)
 
 
@@ -368,9 +390,9 @@ def final_gc_holes(spot_mask: np.ndarray, nucleolus_mask: np.ndarray):
 
     hole_filled = np.zeros_like(final_gc)
     for z in range(final_gc.shape[0]):
-        hole_filled[z] = remove_small_holes(
+        hole_filled[z] = _remove_small_holes(
             final_gc[z].astype(bool),
-            area_threshold=np.count_nonzero(nucleolus_mask[z]),
+            area_threshold=int(np.count_nonzero(nucleolus_mask[z])),
             connectivity=2,
         )
 

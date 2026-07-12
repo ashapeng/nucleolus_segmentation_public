@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from skimage.measure import find_contours, label, marching_cubes, mesh_surface_area, regionprops
-from skimage.morphology import ball, binary_dilation, disk
+from skimage.morphology import ball, dilation, disk
 
 from Import_Functions import import_imgs
 
@@ -286,12 +286,12 @@ def dilated_mask(
 ) -> np.ndarray:
     """Dilate ``mask`` in 3D or slice-by-slice; zeros top/bottom Z slices."""
     if dilated_3d:
-        out = binary_dilation(mask, footprint=ball(radius))
+        out = dilation(mask, footprint=ball(radius))
     elif dilate_slice_by_slice:
         out = np.zeros_like(mask)
         for z in range(mask.shape[0]):
             if np.count_nonzero(mask[z]) > 0:
-                out[z] = binary_dilation(mask[z], footprint=disk(radius))
+                out[z] = dilation(mask[z], footprint=disk(radius))
     else:
         raise ValueError("Set dilated_3d=True or dilate_slice_by_slice=True")
 

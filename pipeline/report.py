@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from pathlib import Path
 from typing import Iterable, List, Optional, Dict, Any
@@ -11,6 +12,16 @@ import pandas as pd
 from pipeline.narrative import build_narrative, figure_caption
 from pipeline.trust import summarize_trust_reports
 from pipeline.types import Manifest, QCReport
+
+logger = logging.getLogger(__name__)
+
+
+def _boxplot_with_stage_labels(ax, data, stages):
+    """Matplotlib ≥3.9 uses tick_labels; older releases used labels."""
+    try:
+        return ax.boxplot(data, tick_labels=stages)
+    except TypeError:
+        return ax.boxplot(data, labels=stages)
 
 
 def plot_and_export(df: pd.DataFrame, out_dir: Path, measurement: str = "volume") -> List[Path]:
@@ -33,7 +44,7 @@ def plot_and_export(df: pd.DataFrame, out_dir: Path, measurement: str = "volume"
             stages = [s for s in ["L1", "L2", "L3", "L4"] if s in set(df["stage"].dropna())]
             data = [df.loc[df["stage"] == s, measurement].dropna().values for s in stages]
             if stages and any(len(d) for d in data):
-                ax.boxplot(data, labels=stages)
+                _boxplot_with_stage_labels(ax, data, stages)
                 ax.set_ylabel(measurement)
                 ax.set_title(f"{measurement} by larval stage")
                 fig_path = out_dir / "figures" / f"{measurement}_by_stage.png"
@@ -45,7 +56,7 @@ def plot_and_export(df: pd.DataFrame, out_dir: Path, measurement: str = "volume"
                 artifacts.append(caption_path)
             plt.close(fig)
         except Exception:
-            pass
+            logger.exception("Failed to export %s boxplot under %s", measurement, out_dir)
     return artifacts
 
 
