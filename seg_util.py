@@ -11,11 +11,11 @@ from skimage.filters import threshold_otsu, threshold_triangle
 from skimage.measure import label
 from skimage.morphology import (
     ball,
-    binary_erosion,
-    binary_opening,
     closing,
     dilation,
     disk,
+    erosion,
+    opening,
     remove_small_holes,
     remove_small_objects,
 )
@@ -53,14 +53,18 @@ def _remove_small_objects(ar: np.ndarray, min_size: int, connectivity: int = 1) 
     New ``max_size`` removes size ``<= max_size``, so ``max_size = min_size - 1``.
     """
     return remove_small_objects(
-        ar, max_size=max(0, int(min_size) - 1), connectivity=connectivity
+        np.asarray(ar, dtype=bool),
+        max_size=max(0, int(min_size) - 1),
+        connectivity=connectivity,
     )
 
 
 def _remove_small_holes(ar: np.ndarray, area_threshold: int, connectivity: int = 1) -> np.ndarray:
     """Wrap skimage remove_small_holes with 0.26+ ``max_size`` API (same off-by-one)."""
     return remove_small_holes(
-        ar, max_size=max(0, int(area_threshold) - 1), connectivity=connectivity
+        np.asarray(ar, dtype=bool),
+        max_size=max(0, int(area_threshold) - 1),
+        connectivity=connectivity,
     )
 
 
@@ -158,7 +162,7 @@ def image_2d_seg(raw_img: np.ndarray, nucleus_mask: Optional[np.ndarray], sigma_
 
     post_seg = np.zeros_like(thresholded, dtype=np.uint8)
     for i in range(n_channels):
-        opened = binary_opening(thresholded[..., i], footprint=np.ones((3, 3)))
+        opened = opening(thresholded[..., i].astype(bool), footprint=np.ones((3, 3), dtype=bool))
         filled = _remove_small_holes(opened, area_threshold=64)
         labeled = label(filled, connectivity=2)
         if labeled.max() == 0:
@@ -335,7 +339,7 @@ def segment_spot(
     del arbitray_cutoff  # API compatibility only
     spot = (np.max(raw_img) - raw_img) if invert_raw else raw_img.copy()
 
-    nucleus_mask_eroded = binary_erosion(nucleus_mask, footprint=ball(2))
+    nucleus_mask_eroded = erosion(nucleus_mask, footprint=ball(2))
     _zero_z_cap_slices(nucleus_mask_eroded)
     eroded_bool = nucleus_mask_eroded.astype(bool)
 
@@ -361,7 +365,7 @@ def segment_spot(
     struct2 = ndi.generate_binary_structure(2, 2)
 
     def _open_clean_close(slice_2d: np.ndarray) -> np.ndarray:
-        opened = binary_opening(slice_2d, footprint=struct2)
+        opened = opening(slice_2d, footprint=struct2)
         cleaned = _remove_small_objects(opened, min_size=10, connectivity=2)
         return closing(cleaned, footprint=struct2).astype(np.uint8)
 
