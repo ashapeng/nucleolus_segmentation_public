@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pipeline.report import write_run_report
+from pipeline.report import plot_and_export, write_run_report
 from pipeline.run_store import create_run_dir
 from pipeline.types import CellRecord, Manifest, QCReport
 import pandas as pd
@@ -67,3 +67,20 @@ def test_write_run_report_includes_narrative_citing_numbers(tmp_path):
     assert "1 AMBER" in text
     assert "increasing" in text
     assert "5.000" in text
+
+
+def test_plot_and_export_writes_volume_boxplot(tmp_path):
+    shapes = pd.DataFrame(
+        {
+            "cell_id": ["20220304_L1/10_2", "20220305_L2/10_1"],
+            "stage": ["L1", "L2"],
+            "volume": [5.0, 12.0],
+        }
+    )
+    artifacts = plot_and_export(shapes, tmp_path)
+    fig = tmp_path / "figures" / "volume_by_stage.png"
+    caption = tmp_path / "figures" / "volume_by_stage.caption.txt"
+    assert fig.is_file()
+    assert caption.is_file()
+    assert fig in artifacts
+    assert (tmp_path / "shapes.csv").is_file()
